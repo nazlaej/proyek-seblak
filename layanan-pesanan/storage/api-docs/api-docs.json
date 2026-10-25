@@ -1,0 +1,239 @@
+{
+    "openapi": "3.0.0",
+    "info": {
+        "title": "API Layanan Pesanan Warung Seblak Ngakak",
+        "description": "Dokumentasi REST API untuk menu dan pemesanan Warung Seblak Ngakak.",
+        "version": "1.0.0"
+    },
+    "paths": {
+        "/api/v1/pesanan": {
+            "get": {
+                "tags": [
+                    "Pesanan"
+                ],
+                "summary": "Menampilkan semua pesanan",
+                "operationId": "daftarPesanan",
+                "responses": {
+                    "200": {
+                        "description": "Daftar pesanan berhasil ditampilkan"
+                    }
+                }
+            },
+            "post": {
+                "tags": [
+                    "Pesanan"
+                ],
+                "summary": "Membuat pesanan baru",
+                "operationId": "buatPesanan",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "required": [
+                                    "nama_pelanggan",
+                                    "items"
+                                ],
+                                "properties": {
+                                    "nama_pelanggan": {
+                                        "type": "string",
+                                        "example": "Nadya"
+                                    },
+                                    "metode_pembayaran": {
+                                        "type": "string",
+                                        "example": "QRIS",
+                                        "nullable": true
+                                    },
+                                    "items": {
+                                        "type": "array",
+                                        "items": {
+                                            "properties": {
+                                                "kode_menu": {
+                                                    "type": "string",
+                                                    "example": "MIN001"
+                                                },
+                                                "jumlah": {
+                                                    "type": "integer",
+                                                    "example": 2
+                                                }
+                                            },
+                                            "type": "object"
+                                        }
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "Pesanan berhasil dibuat"
+                    },
+                    "422": {
+                        "description": "Data pesanan tidak valid"
+                    }
+                }
+            }
+        },
+        "/api/v1/menu": {
+            "get": {
+                "tags": [
+                    "Menu"
+                ],
+                "summary": "Menampilkan daftar menu",
+                "description": "Menampilkan semua menu yang tersedia. Daftar dapat difilter berdasarkan kategori.",
+                "operationId": "daftarMenu",
+                "parameters": [
+                    {
+                        "name": "kategori",
+                        "in": "query",
+                        "description": "Filter menu berdasarkan kategori",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Daftar menu berhasil ditampilkan",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "properties": {
+                                        "data": {
+                                            "type": "array",
+                                            "items": {
+                                                "properties": {
+                                                    "kode": {
+                                                        "type": "string"
+                                                    },
+                                                    "nama_menu": {
+                                                        "type": "string"
+                                                    },
+                                                    "kategori": {
+                                                        "type": "string"
+                                                    },
+                                                    "harga": {
+                                                        "type": "number",
+                                                        "format": "float"
+                                                    },
+                                                    "satuan": {
+                                                        "type": "string"
+                                                    },
+                                                    "tersedia": {
+                                                        "type": "boolean"
+                                                    }
+                                                },
+                                                "type": "object"
+                                            }
+                                        }
+                                    },
+                                    "type": "object"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/pesanan/{nomor}": {
+            "get": {
+                "tags": [
+                    "Pesanan"
+                ],
+                "summary": "Menampilkan detail pesanan",
+                "operationId": "detailPesanan",
+                "parameters": [
+                    {
+                        "name": "nomor",
+                        "in": "path",
+                        "description": "ID pesanan",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Detail pesanan berhasil ditampilkan"
+                    },
+                    "404": {
+                        "description": "Pesanan tidak ditemukan"
+                    }
+                }
+            }
+        },
+        "/api/v1/pesanan/{nomor}/perubahan-status": {
+            "post": {
+                "tags": [
+                    "Pesanan"
+                ],
+                "summary": "Mengubah status pesanan",
+                "operationId": "ubahStatusPesanan",
+                "parameters": [
+                    {
+                        "name": "nomor",
+                        "in": "path",
+                        "description": "ID pesanan",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "required": [
+                                    "status"
+                                ],
+                                "properties": {
+                                    "status": {
+                                        "type": "string",
+                                        "example": "dimasak",
+                                        "enum": [
+                                            "dimasak",
+                                            "siap",
+                                            "selesai",
+                                            "dibatalkan"
+                                        ]
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Status pesanan berhasil diperbarui"
+                    },
+                    "404": {
+                        "description": "Pesanan tidak ditemukan"
+                    },
+                    "409": {
+                        "description": "Perubahan status tidak diperbolehkan"
+                    },
+                    "422": {
+                        "description": "Data status tidak valid"
+                    }
+                }
+            }
+        }
+    },
+    "tags": [
+        {
+            "name": "Menu",
+            "description": "Menu"
+        },
+        {
+            "name": "Pesanan",
+            "description": "Pesanan"
+        }
+    ]
+}

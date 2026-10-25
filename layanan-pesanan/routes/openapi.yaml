@@ -1,0 +1,433 @@
+openapi: 3.0.3
+
+info:
+  title: API Layanan Pesanan Warung Seblak Ngakak
+  description: API untuk melihat menu, membuat pesanan, menyimpan data ke database, dan menerbitkan event pesanan melalui RabbitMQ.
+  version: 1.0.0
+  contact:
+    name: Kelompok Iterasi
+    email: jejefadilah1626@gmail.com
+
+servers:
+  - url: http://localhost:8082
+    description: Server lokal
+
+tags:
+  - name: Menu
+    description: Informasi menu yang tersedia
+  - name: Pesanan
+    description: Pengelolaan pesanan pelanggan
+
+paths:
+  /api/v1/menu:
+    get:
+      summary: Menampilkan daftar menu
+      description: Mengambil seluruh daftar menu yang tersedia pada Warung Seblak Ngakak.
+      operationId: getMenu
+      tags:
+        - Menu
+      responses:
+        '200':
+          description: Daftar menu berhasil ditampilkan.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Menu'
+              example:
+                data:
+                  - kode: "M001"
+                    nama_menu: "Air Mineral"
+                    kategori: "Minuman"
+                    harga: 3000
+                    satuan: "item"
+                    tersedia: true
+                    stok: 20
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /api/v1/pesanan:
+    get:
+      summary: Menampilkan semua pesanan
+      description: Mengambil seluruh pesanan yang pernah dibuat, diurutkan dari yang terbaru.
+      operationId: daftarPesanan
+      tags:
+        - Pesanan
+      responses:
+        '200':
+          description: Daftar pesanan berhasil ditampilkan.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Order'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    post:
+      summary: Membuat pesanan baru
+      description: Menyimpan pesanan beserta detailnya ke database, memeriksa dan mengurangi stok menu, lalu menerbitkan event order.created ke RabbitMQ. Pesanan ditolak bila stok tidak mencukupi.
+      operationId: createOrder
+      tags:
+        - Pesanan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+            example:
+              nama_pelanggan: "Nadya"
+              metode_pembayaran: "QRIS"
+              items:
+                - kode_menu: "M001"
+                  jumlah: 2
+      responses:
+        '201':
+          description: Pesanan berhasil dibuat.
+          headers:
+            Location:
+              description: Lokasi resource pesanan yang baru dibuat.
+              schema:
+                type: string
+                example: http://localhost:8082/api/v1/pesanan/17
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - message
+                  - data
+                properties:
+                  message:
+                    type: string
+                    example: Pesanan berhasil dibuat.
+                  data:
+                    $ref: '#/components/schemas/Order'
+              example:
+                message: Pesanan berhasil dibuat.
+                data:
+                  id: 17
+                  nama_pelanggan: "Nadya"
+                  nama_menu: "Air Mineral"
+                  jumlah: 2
+                  harga: 6000
+                  total_harga: 6000
+                  metode_pembayaran: "QRIS"
+                  status: "diterima"
+                  items:
+                    - menu_id: 1
+                      nama_menu: "Air Mineral"
+                      jumlah: 2
+                      harga_satuan: 3000
+                      subtotal: 6000
+        '422':
+          description: Data tidak valid atau stok menu tidak mencukupi.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+              examples:
+                validasi:
+                  value:
+                    type: "https://example.com/probs/validation-error"
+                    title: "Data tidak valid"
+                    status: 422
+                    detail: "Nama pelanggan wajib diisi."
+                    instance: "/api/v1/pesanan"
+                stok-tidak-cukup:
+                  value:
+                    type: "https://example.com/probs/validation-error"
+                    title: "Data tidak valid"
+                    status: 422
+                    detail: "Stok Ceker tinggal 0, tidak cukup untuk 2."
+                    instance: "/api/v1/pesanan"
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /api/v1/pesanan/{nomor}:
+    get:
+      summary: Menampilkan detail pesanan
+      description: Mengambil satu pesanan lengkap dengan detail item-nya berdasarkan ID.
+      operationId: detailPesanan
+      tags:
+        - Pesanan
+      parameters:
+        - name: nomor
+          in: path
+          required: true
+          description: ID pesanan
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Detail pesanan berhasil ditampilkan.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /api/v1/pesanan/{nomor}/perubahan-status:
+    post:
+      summary: Mengubah status pesanan
+      description: Mengubah status pesanan sesuai alur yang diizinkan (diterima, dimasak, siap, selesai).
+      operationId: ubahStatusPesanan
+      tags:
+        - Pesanan
+      parameters:
+        - name: nomor
+          in: path
+          required: true
+          description: ID pesanan
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - status
+              properties:
+                status:
+                  type: string
+                  enum:
+                    - dimasak
+                    - siap
+                    - selesai
+                    - dibatalkan
+                  example: dimasak
+      responses:
+        '200':
+          description: Status pesanan berhasil diperbarui.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Status pesanan berhasil diperbarui.
+                  data:
+                    $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+components:
+  responses:
+    NotFound:
+      description: Pesanan tidak ditemukan.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          example:
+            type: "https://example.com/probs/not-found"
+            title: "Pesanan tidak ditemukan"
+            status: 404
+            detail: "Pesanan dengan nomor tersebut tidak ada."
+            instance: "/api/v1/pesanan/999"
+    Conflict:
+      description: Perubahan status tidak diperbolehkan.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          example:
+            type: "https://example.com/probs/conflict"
+            title: "Perubahan status tidak diperbolehkan"
+            status: 409
+            detail: "Status tidak dapat diubah dari kondisi saat ini."
+            instance: "/api/v1/pesanan/17/perubahan-status"
+    ValidationError:
+      description: Data yang dikirim tidak valid.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          example:
+            type: "https://example.com/probs/validation-error"
+            title: "Data tidak valid"
+            status: 422
+            detail: "Nama pelanggan wajib diisi."
+            instance: "/api/v1/pesanan"
+    ServerError:
+      description: Terjadi kesalahan pada server.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+  schemas:
+    ProblemDetails:
+      type: object
+      description: Format galat standar RFC 7807 (Problem Details).
+      properties:
+        type:
+          type: string
+          format: uri
+          example: "https://example.com/probs/not-found"
+        title:
+          type: string
+          example: "Pesanan tidak ditemukan"
+        status:
+          type: integer
+          example: 404
+        detail:
+          type: string
+          example: "Pesanan dengan nomor tersebut tidak ada."
+        instance:
+          type: string
+          example: "/api/v1/pesanan/999"
+
+    Menu:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        kode:
+          type: string
+          example: "M001"
+        nama_menu:
+          type: string
+          example: "Air Mineral"
+        kategori:
+          type: string
+          example: "Minuman"
+        harga:
+          type: number
+          example: 3000
+        satuan:
+          type: string
+          example: "item"
+        tersedia:
+          type: boolean
+          example: true
+        stok:
+          type: integer
+          description: Sisa stok menu. Pelanggan hanya dapat memesan selama stok mencukupi.
+          example: 20
+
+    CreateOrderRequest:
+      type: object
+      required:
+        - nama_pelanggan
+        - items
+      properties:
+        nama_pelanggan:
+          type: string
+          maxLength: 255
+          example: "Nadya"
+        metode_pembayaran:
+          type: string
+          nullable: true
+          maxLength: 50
+          example: "QRIS"
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/OrderItemRequest'
+
+    OrderItemRequest:
+      type: object
+      required:
+        - kode_menu
+        - jumlah
+      properties:
+        kode_menu:
+          type: string
+          example: "M001"
+        jumlah:
+          type: integer
+          minimum: 1
+          example: 2
+
+    Order:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 17
+        nama_pelanggan:
+          type: string
+          example: "Nadya"
+        nama_menu:
+          type: string
+          example: "Air Mineral"
+        jumlah:
+          type: integer
+          example: 2
+        harga:
+          type: number
+          example: 6000
+        total_harga:
+          type: number
+          example: 6000
+        metode_pembayaran:
+          type: string
+          nullable: true
+          example: "QRIS"
+        status:
+          type: string
+          example: "diterima"
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderItem'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    OrderItem:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        menu_id:
+          type: integer
+          example: 1
+        nama_menu:
+          type: string
+          example: "Air Mineral"
+        jumlah:
+          type: integer
+          example: 2
+        harga_satuan:
+          type: number
+          example: 3000
+        subtotal:
+          type: number
+          example: 6000
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
