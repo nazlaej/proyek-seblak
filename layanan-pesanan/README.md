@@ -6,10 +6,10 @@
 
 | Nama | NIM | Tanggung Jawab |
 |------|-----|----------------|
-| Diva Anastasya | 1224026 | Layanan Pembukuan (consumer, jurnal penjualan, dashboard) |
-| Dira Andrianti Rahmah | 1224006 | Analisis proses bisnis & dokumen analisis |
-| Nur Alifah Anggraeni | 1224021 | Layanan Dapur (consumer, antrian masak) |
-| Nadjlah Cahya Nerik Fadilah | 3224001 | Layanan Pesanan (API, stok, publisher RabbitMQ), kontrak event RabbitMQ |
+| Diva Anastasya | 1224026 | Layanan pembukuan dan pengujian consumer |
+| Dira Andrianti Rahmah | 1224006 | Dokumen analisis dan alur dapur |
+| Nur Alifah Anggraeni | 1224021 | Integrasi RabbitMQ dan outbox |
+| Nadjlah Cahya Nerik Fadilah | 3224001 | Layanan pesanan dan REST API |
 
 ## Arsitektur Layanan
 
