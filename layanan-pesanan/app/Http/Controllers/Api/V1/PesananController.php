@@ -127,8 +127,12 @@ class PesananController extends Controller
 
         if (!$pesanan) {
             return response()->json([
-                'message' => 'Pesanan tidak ditemukan.',
-            ], 404);
+                'type'  => 'urn:seblak:problem:not-found',
+                'title' => 'Pesanan tidak ditemukan',
+                'status'=> 404,
+                'detail'=> 'Pesanan dengan nomor tersebut tidak ada.',
+                'instance'=> '/api/v1/pesanan/'.$nomor,
+            ], 404, ['Content-Type' => 'application/problem+json']);
         }
 
         return response()->json([
@@ -147,8 +151,12 @@ class PesananController extends Controller
 
         if (!$pesanan) {
             return response()->json([
-                'message' => 'Pesanan tidak ditemukan.',
-            ], 404);
+                'type'  => 'urn:seblak:problem:not-found',
+                'title' => 'Pesanan tidak ditemukan',
+                'status'=> 404,
+                'detail'=> 'Pesanan dengan nomor tersebut tidak ada.',
+                'instance'=> '/api/v1/pesanan/'.$nomor,
+            ], 404, ['Content-Type' => 'application/problem+json']);
         }
 
         $statusSekarang = $pesanan->status;
@@ -168,10 +176,12 @@ class PesananController extends Controller
             true
         )) {
             return response()->json([
-                'message' => 'Perubahan status tidak diperbolehkan.',
-                'status_sekarang' => $statusSekarang,
-                'status_diminta' => $statusBaru,
-            ], 409);
+                'type'  => 'urn:seblak:problem:conflict',
+                'title' => 'Perubahan status tidak diperbolehkan',
+                'status'=> 409,
+                'detail'=> 'Status tidak dapat diubah dari kondisi saat ini.',
+                'instance'=> '/api/v1/pesanan/'.$nomor.'/perubahan-status',
+            ], 409, ['Content-Type' => 'application/problem+json']);
         }
 
         $pesanan->update([

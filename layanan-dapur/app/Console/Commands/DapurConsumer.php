@@ -14,11 +14,11 @@ class DapurConsumer extends Command
 
     protected $description = 'Menerima event order.created dari RabbitMQ dan menyimpannya ke antrian dapur';
 
-    // ===== METHOD BARU UNTUK TEST =====
-    public function processEvent(array $event): bool
+    // ===== METHOD UNTUK TEST & PANGGILAN CALLBACK =====
+    public function processEvent(array $event, string $messageId = ''): bool
     {
         $payload = $event;
-        
+
         if (!is_array($payload) || !isset($payload['data']) || !is_array($payload['data'])) {
             throw new \RuntimeException('Payload pesanan tidak valid.');
         }
@@ -29,9 +29,9 @@ class DapurConsumer extends Command
             throw new \RuntimeException('Payload pesanan tidak memiliki id.');
         }
 
-        // Cek idempoten: order_id sudah ada?
+        // Cek idempoten: order_id sudah ada? (hindari pencatatan ganda)
         if (AntrianDapur::where('order_id', $data['id'])->exists()) {
-            return false; // sudah diproses
+            return false; // sudah diproses, abaikan duplikat
         }
 
         AntrianDapur::create([
@@ -80,25 +80,21 @@ class DapurConsumer extends Command
                 }
 
                 $data = $payload['data'];
+                $messageId = $payload['message_id'] ?? $message->getMessageId();
 
-                if (!isset($data['id'])) {
-                    throw new \RuntimeException('Payload pesanan tidak memiliki id.');
+                // Panggil processEvent yang sudah idempotent (cek duplikat sebelum simpan)
+                $created = $this->processEvent($data, $messageId);
+
+                if ($created) {
+                    $this->info(
+                        'PESANAN MASUK KE DAPUR: pesanan #' . ($data['id'] ?? '?') .
+                        ' atas nama ' . ($data['nama_pelanggan'] ?? '-')
+                    );
+                } else {
+                    $this->info('Duplikat diabaikan: pesanan #' . ($data['id'] ?? '?'));
                 }
 
-                $antrian = AntrianDapur::create([
-                    'order_id' => $data['id'],
-                    'nama_pelanggan' => $data['nama_pelanggan'] ?? '-',
-                    'detail_item' => $data['items'] ?? [],
-                    'status' => 'menunggu',
-                ]);
-
-                $this->info(
-                    'PESANAN MASUK KE DAPUR: pesanan #' . $antrian->order_id .
-                    ' atas nama ' . $antrian->nama_pelanggan .
-                    ' (' . count($antrian->detail_item) . ' item)'
-                );
-
-                // ACK hanya setelah penyimpanan ke database berhasil.
+                // ACK hanya setelah diproses (atau duplikat diabaikan).
                 $message->ack();
             } catch (Throwable $e) {
                 // NACK tanpa requeue agar pesan gagal tidak berputar tanpa akhir.

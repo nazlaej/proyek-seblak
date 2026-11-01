@@ -142,4 +142,90 @@ class PesananApiTest extends TestCase
             'stok' => 2,
         ]);
     }
+
+    public function test_stok_tidak_cukup_mengembalikan_problem_details(): void
+    {
+        $this->mock(OrderPublisher::class, function ($mock) {
+            $mock->shouldReceive('publish')->never();
+        });
+
+        Menu::create([
+            'kode' => 'TEST004',
+            'nama_menu' => 'Menu Problem Details',
+            'kategori' => 'Makanan',
+            'harga' => 3000,
+            'satuan' => 'item',
+            'tersedia' => true,
+            'stok' => 2,
+        ]);
+
+        $response = $this->postJson('/api/v1/pesanan', [
+            'nama_pelanggan' => 'Pelanggan Problem',
+            'items' => [
+                ['kode_menu' => 'TEST004', 'jumlah' => 999],
+            ],
+        ]);
+
+        $response->assertStatus(422);
+        $response->assertHeader('Content-Type', 'application/problem+json');
+        $response->assertJson([
+            'type'  => 'urn:seblak:problem:validasi-gagal',
+            'title' => 'Data tidak valid',
+            'status'=> 422,
+        ]);
+
+        $this->assertDatabaseCount('orders', 0);
+        $this->assertDatabaseHas('menus', [
+            'kode' => 'TEST004',
+            'stok' => 2,
+        ]);
+    }
+
+    public function test_pesanan_tidak_ditemukan_mengembalikan_404_problem_details(): void
+    {
+        $response = $this->getJson('/api/v1/pesanan/999999');
+
+        $response->assertStatus(404);
+        $response->assertHeader('Content-Type', 'application/problem+json');
+        $response->assertJson([
+            'type'  => 'urn:seblak:problem:not-found',
+            'title' => 'Pesanan tidak ditemukan',
+            'status'=> 404,
+        ]);
+    }
+
+    public function test_status_melompat_mengembalikan_409_problem_details(): void
+    {
+        $this->mock(OrderPublisher::class, function ($mock) {
+            $mock->shouldReceive('publish')->once();
+        });
+
+        Menu::create([
+            'kode' => 'TEST005',
+            'nama_menu' => 'Menu Status',
+            'kategori' => 'Makanan',
+            'harga' => 3000,
+            'satuan' => 'item',
+            'tersedia' => true,
+            'stok' => 10,
+        ]);
+
+        $this->postJson('/api/v1/pesanan', [
+            'nama_pelanggan' => 'Pelanggan Status',
+            'items' => [['kode_menu' => 'TEST005', 'jumlah' => 1]],
+        ])->assertStatus(201);
+
+        // Status awal 'diterima', coba lompat langsung ke 'selesai' (harus 409)
+        $response = $this->postJson('/api/v1/pesanan/1/perubahan-status', [
+            'status' => 'selesai',
+        ]);
+
+        $response->assertStatus(409);
+        $response->assertHeader('Content-Type', 'application/problem+json');
+        $response->assertJson([
+            'type'  => 'urn:seblak:problem:conflict',
+            'title' => 'Perubahan status tidak diperbolehkan',
+            'status'=> 409,
+        ]);
+    }
 }
