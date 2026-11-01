@@ -6,10 +6,12 @@ use App\Http\Controllers\Controller;
 use App\Events\OrderCreated;
 use App\Models\Menu;
 use App\Models\Order;
+use App\Models\OutboxMessage;
 use App\Services\OrderPublisher;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
+use Illuminate\Support\Str;
 
 class PesananController extends Controller
 {
@@ -36,7 +38,7 @@ class PesananController extends Controller
             'items.*.jumlah' => 'required|integer|min:1',
         ]);
 
-        $hasil = DB::transaction(function () use ($validated) {
+        $transaksi = DB::transaction(function () use ($validated) {
             $itemsPesanan = [];
             $totalHarga = 0;
 
@@ -104,12 +106,30 @@ class PesananController extends Controller
                 $pesanan->items()->create($item);
             }
 
-            return $pesanan->load('items');
+            $pesanan->load('items');
+            $event = new OrderCreated($pesanan->toArray());
+            $eventId = (string) Str::uuid();
+            $outboxMessage = OutboxMessage::create([
+                'event_id' => $eventId,
+                'event_name' => 'order.created',
+                'aggregate_type' => 'order',
+                'aggregate_id' => (string) $pesanan->id,
+                'payload' => [
+                    'event_id' => $eventId,
+                    'event' => 'order.created',
+                    'data' => $event->order,
+                    'occurred_at' => now()->toISOString(),
+                ],
+            ]);
+
+            return [
+                'order' => $pesanan,
+                'outbox' => $outboxMessage,
+            ];
         });
 
-        $publisher->publish(
-            new OrderCreated($hasil->toArray())
-        );
+        $hasil = $transaksi['order'];
+        $publisher->publish($transaksi['outbox']);
 
         return response()->json([
             'message' => 'Pesanan berhasil dibuat.',
@@ -182,6 +202,20 @@ class PesananController extends Controller
                 'detail'=> 'Status tidak dapat diubah dari kondisi saat ini.',
                 'instance'=> '/api/v1/pesanan/'.$nomor.'/perubahan-status',
             ], 409, ['Content-Type' => 'application/problem+json']);
+        }
+
+        // Jika dibatalkan: kembalikan stok ke semua menu yang dipesan
+        if ($statusBaru === 'dibatalkan') {
+            DB::transaction(function () use ($pesanan) {
+                foreach ($pesanan->items as $item) {
+                    $menu = Menu::where('id', $item->menu_id)
+                        ->lockForUpdate()
+                        ->first();
+                    if ($menu) {
+                        $menu->increment('stok', $item->jumlah);
+                    }
+                }
+            });
         }
 
         $pesanan->update([

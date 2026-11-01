@@ -74,8 +74,11 @@ class PesananApiTest extends TestCase
         // Memastikan API menolak data yang tidak valid.
         $response->assertStatus(422);
 
-        $response->assertJsonValidationErrors([
-            'nama_pelanggan',
+        $response->assertHeader('Content-Type', 'application/problem+json');
+        $response->assertJson([
+            'type'  => 'urn:seblak:problem:validasi-gagal',
+            'title' => 'Data tidak valid',
+            'status'=> 422,
         ]);
     }
 
@@ -133,7 +136,12 @@ class PesananApiTest extends TestCase
         ]);
 
         $response->assertStatus(422);
-        $response->assertJsonValidationErrors(['items']);
+        $response->assertHeader('Content-Type', 'application/problem+json');
+        $response->assertJson([
+            'type'  => 'urn:seblak:problem:validasi-gagal',
+            'title' => 'Data tidak valid',
+            'status'=> 422,
+        ]);
 
         // Pesanan tidak boleh tersimpan, dan stok tidak boleh berubah.
         $this->assertDatabaseCount('orders', 0);
@@ -210,13 +218,15 @@ class PesananApiTest extends TestCase
             'stok' => 10,
         ]);
 
-        $this->postJson('/api/v1/pesanan', [
+        $createResponse = $this->postJson('/api/v1/pesanan', [
             'nama_pelanggan' => 'Pelanggan Status',
             'items' => [['kode_menu' => 'TEST005', 'jumlah' => 1]],
-        ])->assertStatus(201);
+        ]);
+        $createResponse->assertStatus(201);
+        $orderId = $createResponse->json('data.id');
 
         // Status awal 'diterima', coba lompat langsung ke 'selesai' (harus 409)
-        $response = $this->postJson('/api/v1/pesanan/1/perubahan-status', [
+        $response = $this->postJson('/api/v1/pesanan/'.$orderId.'/perubahan-status', [
             'status' => 'selesai',
         ]);
 

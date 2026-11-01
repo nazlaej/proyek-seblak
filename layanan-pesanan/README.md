@@ -36,11 +36,12 @@ Secara keseluruhan, alur sistem dapat dibayangkan sebagai sebuah rantai yang men
 2. **Validasi request.** Controller menerima permintaan dan memvalidasi kelengkapan data (nama pelanggan wajib diisi, daftar item minimal berisi satu item, setiap item harus menyertakan kode menu dan jumlah minimal satu). Bila data tidak valid, API langsung mengembalikan respons galat tanpa menyentuh database.
 3. **Perhitungan dan validasi menu.** Untuk setiap item, sistem mencari menu di database berdasarkan kode menu. Menu yang tidak ditemukan atau berstatus tidak tersedia akan menolak proses pemesanan. Bila valid, sistem menghitung subtotal (jumlah dikali harga satuan) serta menjumlahkan seluruh item menjadi total harga.
 4. **Penyimpanan transaksi.** Seluruh proses penyimpanan dibungkus dalam satu transaksi database. Pesanan utama disimpan pada tabel `orders`, kemudian setiap item disimpan pada tabel `order_items` yang berelasi ke pesanan induk. Transaksi memastikan bahwa pesanan tidak akan tersimpan setengah jadi bila terjadi kegagalan di tengah proses.
-5. **Penerbitan event.** Setelah pesanan dan itemnya berhasil tersimpan, `OrderPublisher` membuat pesan berformat JSON yang memuat nama event, data pesanan, dan waktu kejadian, lalu mempublikasikannya ke exchange RabbitMQ dengan routing key `order.created`.
-6. **Distribusi oleh broker.** Exchange `seblak.events` bertipe `topic` mengarahkan pesan ke queue `seblak.orders` karena routing key-nya cocok. RabbitMQ menyimpan pesan tersebut secara persisten hingga ada konsumen yang mengambilnya.
-7. **Pemrosesan oleh consumer.** Perintah `rabbitmq:consume-orders` menjalankan consumer yang menunggu pesan pada queue. Ketika pesan datang, consumer menampilkan isinya, lalu mengakui pesan tersebut dengan ACK. Bila terjadi kegagalan pemrosesan, pesan ditolak (NACK) agar tidak hilang secara diam-diam.
+5. **Pencatatan outbox.** Di dalam transaksi database yang sama dengan pesanan dan itemnya, aplikasi menyimpan event `order.created` ke tabel `outbox_messages`. Event tetap tercatat walaupun RabbitMQ sedang tidak tersedia.
+6. **Penerbitan dan retry.** Setelah transaksi berhasil, `OrderPublisher` mencoba mengirim event persisten ke exchange RabbitMQ memakai publisher confirms dan routing mandatory. Baris outbox ditandai terkirim hanya jika broker mengonfirmasi pesan yang memiliki tujuan queue. Jika gagal, baris tetap tertunda dan dapat dicoba ulang dengan `php artisan outbox:publish`.
+7. **Distribusi oleh broker.** Setiap layanan penerima mengikat queue miliknya ke exchange dengan routing key `order.created`. Consumer contoh pada layanan pesanan menggunakan queue `seblak.orders`.
+8. **Pemrosesan oleh consumer.** Perintah `rabbitmq:consume-orders` menjalankan consumer lokal. Consumer contoh ini menampilkan isi pesan dan memberi ACK. Consumer produksi perlu menyelesaikan pekerjaan bisnis sebelum ACK dan menangani duplikasi berdasarkan `event_id`.
 
-Dengan urutan ini, pengalaman pengguna tetap cepat—karena respons API hanya menunggu hingga penyimpanan selesai—sedangkan proses lanjutan dikerjakan melalui jalur event yang terpisah.
+Pesanan dan event outbox commit bersama sebelum publisher mencoba mengirim. API menunggu satu percobaan publish dan konfirmasi broker, jadi RabbitMQ yang lambat dapat menambah waktu respons. Jika RabbitMQ gagal, transaksi pesanan tetap tersimpan dan event dapat dikirim ulang tanpa membuat pesanan baru.
 
 ## Teknologi yang Digunakan
 
@@ -51,7 +52,7 @@ Sistem ini dibangun di atas beberapa teknologi utama yang saling melengkapi:
 | Laravel | Framework utama untuk membangun REST API, routing, validasi, ORM, dan pengujian. |
 | Laravel Sail | Lingkungan pengembangan berbasis Docker agar PHP, MySQL, dan RabbitMQ konsisten di semua anggota tim. |
 | PHP | Bahasa pemrograman tempat seluruh logika aplikasi ditulis. |
-| MySQL | Database relasional tempat tabel `menus`, `orders`, dan `order_items` disimpan. |
+| MySQL | Database relasional tempat tabel `menus`, `orders`, `order_items`, dan `outbox_messages` disimpan. |
 | RabbitMQ | Message broker yang menerima event dari publisher dan mengantarkannya ke consumer. |
 | Swagger (L5-Swagger) | Menyediakan antarmuka dokumentasi API yang interaktif. |
 | Docker Desktop (WSL) | Menjalankan seluruh container layanan (Laravel, MySQL, RabbitMQ). |
@@ -63,7 +64,8 @@ Berikut bagian-bagian penting dari struktur proyek beserta perannya, disusun ses
 ```
 layanan-pesanan/
 ├── app/
-│   ├── Console/Commands/OrderConsumer.php      # Perintah artisan consumer RabbitMQ
+│   ├── Console/Commands/OrderConsumer.php      # Consumer demonstrasi RabbitMQ
+│   ├── Console/Commands/PublishOutboxMessages.php # Retry event tertunda
 │   ├── Events/OrderCreated.php                 # Representasi event order.created
 │   ├── Http/Controllers/Api/
 │   │   ├── MenuController.php                  # API menu versi lama
@@ -74,11 +76,12 @@ layanan-pesanan/
 │   ├── Models/
 │   │   ├── Menu.php                            # Model menu
 │   │   ├── Order.php                           # Model pesanan induk
-│   │   └── OrderItem.php                       # Model rincian item pesanan
+│   │   ├── OrderItem.php                       # Model rincian item pesanan
+│   │   └── OutboxMessage.php                   # Model event outbox
 │   ├── OpenApi/
 │   │   ├── OpenApiSpec.php                     # Metadata dokumentasi OpenAPI
 │   │   └── PesananApi.php                      # Anotasi endpoint untuk Swagger
-│   └── Services/OrderPublisher.php             # Pengirim event ke RabbitMQ
+│   └── Services/OrderPublisher.php             # Pengirim outbox ke RabbitMQ
 ├── config/rabbitmq.php                         # Konfigurasi koneksi RabbitMQ
 ├── database/
 │   ├── migrations/                             # Definisi skema tabel
@@ -195,7 +198,7 @@ Request body memuat `status` dengan nilai salah satu dari `dimasak`, `siap`, `se
 
 Pembuatan pesanan merupakan inti dari sistem ini dan menjalankan beberapa langkah yang saling bergantung. Pertama, controller `PesananController::store` memvalidasi isi request melalui mekanisme validasi Laravel. Jika lolos, seluruh proses penyimpanan dijalankan di dalam `DB::transaction`, sehingga perubahan bersifat atomik. Di dalam transaksi tersebut, setiap item dipetakan ke menu pada tabel `menus` berdasarkan `kode` dan status ketersediaan. Menu yang tidak valid langsung menstrukturkan galat validasi. Untuk setiap item yang valid, sistem menghitung `subtotal` dari jumlah dikalikan harga satuan dan mengakumulasikannya ke `total_harga`.
 
-Selanjutnya, `Order::create` menyimpan pesanan induk dengan kolom seperti `nama_pelanggan`, gabungan nama menu, jumlah total, harga, `total_harga`, metode pembayaran, dan status awal `diterima`. Setelah pesanan induk tersimpan, setiap item disimpan melalui relasi `items()` ke tabel `order_items`. Baru setelah transaksi selesai dan data tersimpan, `OrderPublisher::publish` dipanggil dengan membawa objek `OrderCreated` yang berisi data pesanan. Dengan urutan ini, event hanya diterbitkan untuk pesanan yang benar-benar sudah tersimpan di database.
+Selanjutnya, `Order::create` menyimpan pesanan induk dan setiap item disimpan melalui relasi `items()` ke tabel `order_items`. Dalam transaksi database yang sama, aplikasi membuat baris `outbox_messages` berisi `event_id`, nama event, payload JSON, dan waktu kejadian. Setelah commit, `OrderPublisher::publish` mencoba mengirim payload tersebut ke RabbitMQ. Bila pengiriman gagal, API tetap dapat merespons pesanan yang berhasil tersimpan dan event tetap berstatus tertunda untuk retry.
 
 ## Konfigurasi RabbitMQ
 
@@ -208,12 +211,12 @@ Semua pengaturan koneksi RabbitMQ diambil dari berkas `config/rabbitmq.php` yang
 | Queue Kasir | `seblak.orders` (durable) |
 | Queue Dapur | `dapur.orders` (durable, milik layanan Dapur) |
 | Queue Pembukuan | `pembukuan.orders` (durable, milik layanan Pembukuan) |
-| Dead letter | `seblak.dlx` + `pembukuan.orders.dlq` |
+| Outbox | Tabel `outbox_messages` pada database layanan pesanan |
 | Publisher | `App\Services\OrderPublisher` |
 
-Setiap layanan memiliki **queue sendiri** yang terikat pada exchange yang sama (pola *publish–subscribe*). Dengan begitu, satu pesanan dapat diproses oleh Kasir, Dapur, dan Pembukuan sekaligus tanpa saling berebut pesan.
+Target arsitektur memakai **queue sendiri untuk setiap layanan** yang terikat pada exchange yang sama (*publish–subscribe*). Satu event dapat diterima oleh Kasir, Dapur, dan Pembukuan secara independen. Dalam repo layanan pesanan ini, consumer demonstrasi hanya mendeklarasikan queue `seblak.orders`; queue dan binding Dapur serta Pembukuan harus tersedia di repo layanan masing-masing.
 
-Publisher mendeklarasikan exchange secara idempoten (aman dipanggil berulang), mengaktifkan **publisher confirms** agar aplikasi dapat mengetahui apakah broker benar-benar menerima pesan, lalu mempublikasikan pesan yang bersifat `persistent`. Consumer mendeklarasikan queue dan binding yang sama, menerapkan Quality of Service (QoS) satu pesan sekaligus, dan mengakui setiap pesan dengan ACK setelah berhasil diproses. Bila pemrosesan gagal, pesan ditolak dengan NACK dan kegagalannya dicatat pada log agar tidak hilang tanpa jejak.
+Publisher mendeklarasikan exchange secara idempoten, mengaktifkan **publisher confirms**, dan mengirim pesan `persistent` dengan routing mandatory. Event dicatat di outbox bersama transaksi pesanan. Penerimaan broker ditandai pada `published_at`; kegagalan koneksi, konfirmasi, atau routing dicatat pada `last_error` dan dapat dicoba ulang. Penerima perlu menggunakan `event_id` sebagai kunci deduplikasi karena retry dapat mengirim event lebih dari sekali.
 
 ## Kontrak Event
 
@@ -232,6 +235,7 @@ Pesan yang dipublikasikan mengikuti format event yang tetap:
 
 ```json
 {
+  "event_id": "02745a26-52cf-4bda-94d2-76d594fd321e",
   "event": "order.created",
   "data": {
     "id": 36,
@@ -262,6 +266,7 @@ Field beserta tipenya:
 
 | Field | Tipe | Keterangan |
 |-------|------|-----------|
+| `event_id` | string (UUID) | Identitas event yang stabil untuk deduplikasi |
 | `event` | string | Nama event (`order.created`) |
 | `data.id` | integer | ID pesanan |
 | `data.nama_pelanggan` | string | Nama pelanggan |
@@ -279,7 +284,17 @@ Field beserta tipenya:
 | `data.items[].subtotal` | string (decimal) | Subtotal item |
 | `occurred_at` | string (ISO-8601) | Waktu kejadian |
 
-Penerima memakai `data.id` sebagai **kunci idempoten** sehingga pesan yang dikirim ulang broker tidak dicatat dua kali.
+`event_id` tetap sama pada setiap retry. Setiap consumer yang menyimpan efek bisnis perlu mencatat ID event yang sudah diproses agar pengiriman ulang tidak menggandakan efek tersebut.
+
+### Pola Outbox dan pemulihan pesan
+
+Tabel `orders`, `order_items`, dan `outbox_messages` ditulis dalam satu transaksi database. Setelah transaksi commit, aplikasi mencoba mengirim event ke RabbitMQ. Bila koneksi gagal, pesanan tetap tersimpan dan baris event tidak dihapus atau ditandai terkirim. Jalankan perintah ini untuk mengirim ulang event tertunda:
+
+```bash
+./vendor/bin/sail artisan outbox:publish
+```
+
+Perintah menerima opsi `--limit=100` untuk membatasi jumlah event per pemanggilan. Jika proses mati setelah RabbitMQ menerima pesan tetapi sebelum database menyimpan `published_at`, retry dapat menghasilkan duplikasi. Karena itu, consumer perlu idempoten berdasarkan `event_id`. Outbox menjamin event tercatat bersama transaksi dan dapat dikirim ulang; pola ini tidak menjamin pemrosesan tepat-satu-kali.
 
 ## Instalasi dan Menjalankan Proyek
 
@@ -289,13 +304,21 @@ Untuk menjalankan proyek dari awal, pastikan **Docker Desktop** dan **WSL** suda
 # 1. Masuk ke folder proyek
 cd ~/layanan-pesanan
 
-# 2. Siapkan berkas environment
+# 2. Pasang dependency PHP dan siapkan environment
+composer install
 cp .env.example .env
 
-# 3. Jalankan seluruh container (Laravel, MySQL, RabbitMQ)
+# Atur database dan RabbitMQ di .env untuk Docker Compose:
+# DB_CONNECTION=mysql, DB_HOST=mysql, DB_PORT=3306,
+# DB_DATABASE, DB_USERNAME, DB_PASSWORD, RABBITMQ_HOST=rabbitmq
+
+# 3. Buat application key
+./vendor/bin/sail artisan key:generate
+
+# 4. Jalankan seluruh container (Laravel, MySQL, RabbitMQ)
 ./vendor/bin/sail up -d
 
-# 4. Jalankan migrasi database dan seeder menu
+# 5. Jalankan migrasi database dan seeder menu (termasuk tabel outbox)
 ./vendor/bin/sail artisan migrate --seed
 ```
 
@@ -341,7 +364,7 @@ Untuk membuktikan bahwa pesanan benar-benar diproses dari ujung ke ujung, ikuti 
 5. Tekan **Execute** dan periksa bahwa API mengembalikan HTTP 201 beserta data pesanan.
 6. Beralih ke terminal consumer, dan pastikan isi pesanan muncul pada layar. Kemunculan pesan ini menandakan bahwa event `order.created` berhasil melewati exchange, queue, hingga diterima consumer.
 
-Bila pesan tidak muncul, pastikan hanya ada **satu** consumer yang berjalan agar pesan tidak terbagi ke beberapa consumer secara acak. Untuk menghentikan consumer dengan bersih, gunakan:
+Bila pesan tidak muncul, periksa status RabbitMQ, binding queue, serta baris tertunda dengan menjalankan `./vendor/bin/sail artisan outbox:publish`. Beberapa consumer pada queue yang sama akan membagi pesan; untuk demonstrasi, jalankan satu consumer agar mudah mengamati pesan.
 
 ```bash
 ./vendor/bin/sail exec laravel.test pkill -f rabbitmq:consume-orders
@@ -358,6 +381,21 @@ Perintah untuk menjalankan seluruh pengujian:
 ```
 
 Perlu dipahami bahwa pengujian fitur di atas **berbeda** dengan pengujian integrasi RabbitMQ. Pengujian fitur memverifikasi logika API dan penyimpanan database tanpa broker, sedangkan verifikasi jalur event secara nyata dilakukan melalui pengujian manual seperti dijelaskan pada bagian panduan Swagger, yaitu dengan mengamati pesan yang diterima consumer.
+
+## Analisis dan persiapan Checkpoint 1
+
+Dokumen analisis 4–8 halaman, diagram tiga layanan, konteks mitra, masalah integrasi, pilihan gaya integrasi, dan trade-off tersedia pada [docs/analisis-checkpoint-1.md](docs/analisis-checkpoint-1.md). Dokumen Markdown ini menjadi sumber yang dapat diekspor menjadi PDF untuk pengumpulan.
+
+### Urutan demo empat menit
+
+1. Tunjukkan diagram arsitektur dan jelaskan jalur REST serta event RabbitMQ.
+2. Kirim satu request sukses `POST /api/v1/pesanan` dan tunjukkan respons `201`.
+3. Kirim request tidak valid (misalnya `items` kosong) dan tunjukkan `422 application/problem+json`.
+4. Jalankan `./vendor/bin/sail artisan test` dan tunjukkan hasilnya.
+5. Tunjukkan event yang diterima consumer. Bila tertunda, jalankan `./vendor/bin/sail artisan outbox:publish`.
+6. Setiap anggota menjelaskan kontribusi dan file yang dikerjakannya; siapkan riwayat commit kelompok.
+
+Sebelum checkpoint, jalankan `./vendor/bin/sail up -d`, pastikan RabbitMQ sehat, dan siapkan Swagger/curl serta consumer di terminal terpisah. Tarik image Docker sebelum hari pemeriksaan.
 
 ## Penutup
 

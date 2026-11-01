@@ -2,7 +2,7 @@
 
 namespace App\Services;
 
-use App\Events\OrderCreated;
+use App\Models\OutboxMessage;
 use Illuminate\Support\Facades\Log;
 use PhpAmqpLib\Connection\AMQPStreamConnection;
 use PhpAmqpLib\Message\AMQPMessage;
@@ -12,17 +12,10 @@ class OrderPublisher
 {
     private const EXCHANGE = 'seblak.events';
 
-    private const ROUTING_KEY = 'order.created';
-
-    public function publish(OrderCreated $event): void
+    public function publish(OutboxMessage $outboxMessage): bool
     {
-        $startedAt = microtime(true);
-
-        Log::info('RabbitMQ publish dimulai', [
-            'exchange' => self::EXCHANGE,
-            'routing_key' => self::ROUTING_KEY,
-            'order_id' => $event->order['id'] ?? null,
-        ]);
+        $connection = null;
+        $channel = null;
 
         try {
             $connection = new AMQPStreamConnection(
@@ -32,26 +25,8 @@ class OrderPublisher
                 config('rabbitmq.password'),
                 config('rabbitmq.vhost')
             );
-        } catch (Throwable $e) {
-            Log::error('RabbitMQ gagal terhubung', [
-                'host' => config('rabbitmq.host'),
-                'port' => config('rabbitmq.port'),
-                'order_id' => $event->order['id'] ?? null,
-                'error' => $e->getMessage(),
-            ]);
 
-            report($e);
-
-            return;
-        }
-
-        $channel = null;
-        $confirmed = false;
-
-        try {
             $channel = $connection->channel();
-
-            // Membuat exchange untuk event aplikasi.
             $channel->exchange_declare(
                 self::EXCHANGE,
                 'topic',
@@ -59,54 +34,68 @@ class OrderPublisher
                 true,
                 false
             );
-
-            // Mengaktifkan publisher confirms agar broker mengonfirmasi penerimaan.
             $channel->confirm_select();
 
-            // Menyiapkan isi pesan dalam format JSON.
-            $payload = [
-                'event' => 'order.created',
-                'data' => $event->order,
-                'occurred_at' => now()->toISOString(),
-            ];
+            $returned = null;
+            $channel->set_return_listener(
+                function ($replyCode, $replyText) use (&$returned): void {
+                    $returned = "RabbitMQ menolak routing ({$replyCode}): {$replyText}";
+                }
+            );
 
             $message = new AMQPMessage(
-                json_encode($payload, JSON_THROW_ON_ERROR),
+                json_encode($outboxMessage->payload, JSON_THROW_ON_ERROR),
                 [
                     'content_type' => 'application/json',
                     'delivery_mode' => AMQPMessage::DELIVERY_MODE_PERSISTENT,
+                    'message_id' => $outboxMessage->event_id,
+                    'type' => $outboxMessage->event_name,
                 ]
             );
 
-            // Mengirim event ke exchange RabbitMQ.
             $channel->basic_publish(
                 $message,
                 self::EXCHANGE,
-                self::ROUTING_KEY
+                $outboxMessage->event_name,
+                true,
+                false
             );
+            $channel->wait_for_pending_acks_returns();
 
-            // Menunggu konfirmasi dari broker.
-            $channel->wait_for_pending_acks();
+            if ($returned !== null) {
+                throw new \RuntimeException($returned);
+            }
 
-            $confirmed = true;
+            $outboxMessage->forceFill([
+                'attempts' => $outboxMessage->attempts + 1,
+                'last_error' => null,
+                'published_at' => now(),
+            ])->save();
 
-            Log::info('RabbitMQ publish berhasil dikonfirmasi broker', [
-                'exchange' => self::EXCHANGE,
-                'routing_key' => self::ROUTING_KEY,
-                'order_id' => $event->order['id'] ?? null,
-                'durasi_ms' => round((microtime(true) - $startedAt) * 1000, 2),
+            Log::info('Outbox event dikonfirmasi RabbitMQ', [
+                'event_id' => $outboxMessage->event_id,
+                'event' => $outboxMessage->event_name,
+                'aggregate_id' => $outboxMessage->aggregate_id,
             ]);
+
+            return true;
         } catch (Throwable $e) {
-            Log::error('RabbitMQ publish gagal', [
-                'exchange' => self::EXCHANGE,
-                'routing_key' => self::ROUTING_KEY,
-                'order_id' => $event->order['id'] ?? null,
+            $outboxMessage->forceFill([
+                'attempts' => $outboxMessage->attempts + 1,
+                'last_error' => substr($e->getMessage(), 0, 65535),
+            ])->save();
+
+            Log::error('Outbox event gagal dikirim; pesan tetap tertunda', [
+                'event_id' => $outboxMessage->event_id,
+                'event' => $outboxMessage->event_name,
+                'aggregate_id' => $outboxMessage->aggregate_id,
                 'error' => $e->getMessage(),
             ]);
 
             report($e);
+
+            return false;
         } finally {
-            // Menutup channel jika masih terbuka.
             if ($channel !== null) {
                 try {
                     $channel->close();
@@ -115,20 +104,15 @@ class OrderPublisher
                 }
             }
 
-            // Menutup koneksi RabbitMQ.
-            try {
-                if ($connection->isConnected()) {
-                    $connection->close();
+            if ($connection !== null) {
+                try {
+                    if ($connection->isConnected()) {
+                        $connection->close();
+                    }
+                } catch (Throwable $e) {
+                    report($e);
                 }
-            } catch (Throwable $e) {
-                report($e);
             }
-        }
-
-        if (!$confirmed) {
-            Log::warning('RabbitMQ pesan tidak terkonfirmasi dan dianggap gagal dikirim', [
-                'order_id' => $event->order['id'] ?? null,
-            ]);
         }
     }
 }
