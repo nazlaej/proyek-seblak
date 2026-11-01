@@ -26,6 +26,13 @@ paths:
       operationId: getMenu
       tags:
         - Menu
+      parameters:
+        - name: kategori
+          in: query
+          required: false
+          description: Filter menu berdasarkan kategori.
+          schema:
+            type: string
       responses:
         '200':
           description: Daftar menu berhasil ditampilkan.
@@ -40,11 +47,11 @@ paths:
                       $ref: '#/components/schemas/Menu'
               example:
                 data:
-                  - kode: "M001"
+                  - kode: "MIN001"
                     nama_menu: "Air Mineral"
-                    kategori: "Minuman"
-                    harga: 3000
-                    satuan: "item"
+                    kategori: "minuman"
+                    harga: "3000.00"
+                    satuan: "botol"
                     tersedia: true
                     stok: 20
         '500':
@@ -87,7 +94,7 @@ paths:
               nama_pelanggan: "Nadya"
               metode_pembayaran: "QRIS"
               items:
-                - kode_menu: "M001"
+                - kode_menu: "MIN001"
                   jumlah: 2
       responses:
         '201':
@@ -118,37 +125,20 @@ paths:
                   nama_pelanggan: "Nadya"
                   nama_menu: "Air Mineral"
                   jumlah: 2
-                  harga: 6000
-                  total_harga: 6000
+                  harga: "6000.00"
+                  total_harga: "6000.00"
                   metode_pembayaran: "QRIS"
                   status: "diterima"
                   items:
                     - menu_id: 1
+                      id: 1
+                      order_id: 17
                       nama_menu: "Air Mineral"
                       jumlah: 2
-                      harga_satuan: 3000
-                      subtotal: 6000
+                      harga_satuan: "3000.00"
+                      subtotal: "6000.00"
         '422':
-          description: Data tidak valid atau stok menu tidak mencukupi.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/ProblemDetails'
-              examples:
-                validasi:
-                  value:
-                    type: "https://example.com/probs/validation-error"
-                    title: "Data tidak valid"
-                    status: 422
-                    detail: "Nama pelanggan wajib diisi."
-                    instance: "/api/v1/pesanan"
-                stok-tidak-cukup:
-                  value:
-                    type: "https://example.com/probs/validation-error"
-                    title: "Data tidak valid"
-                    status: 422
-                    detail: "Stok Ceker tinggal 0, tidak cukup untuk 2."
-                    instance: "/api/v1/pesanan"
+          $ref: '#/components/responses/ValidationError'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -243,7 +233,7 @@ components:
           schema:
             $ref: '#/components/schemas/ProblemDetails'
           example:
-            type: "https://example.com/probs/not-found"
+            type: "about:blank"
             title: "Pesanan tidak ditemukan"
             status: 404
             detail: "Pesanan dengan nomor tersebut tidak ada."
@@ -255,11 +245,13 @@ components:
           schema:
             $ref: '#/components/schemas/ProblemDetails'
           example:
-            type: "https://example.com/probs/conflict"
+            type: "about:blank"
             title: "Perubahan status tidak diperbolehkan"
             status: 409
             detail: "Status tidak dapat diubah dari kondisi saat ini."
             instance: "/api/v1/pesanan/17/perubahan-status"
+            status_sekarang: "selesai"
+            status_diminta: "dimasak"
     ValidationError:
       description: Data yang dikirim tidak valid.
       content:
@@ -267,27 +259,42 @@ components:
           schema:
             $ref: '#/components/schemas/ProblemDetails'
           example:
-            type: "https://example.com/probs/validation-error"
+            type: "about:blank"
             title: "Data tidak valid"
             status: 422
             detail: "Nama pelanggan wajib diisi."
             instance: "/api/v1/pesanan"
+            errors:
+              nama_pelanggan:
+                - "Nama pelanggan wajib diisi."
     ServerError:
       description: Terjadi kesalahan pada server.
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetails'
+          example:
+            type: "about:blank"
+            title: "Kesalahan pada server"
+            status: 500
+            detail: "Terjadi kesalahan internal saat memproses permintaan."
+            instance: "/api/v1/pesanan"
 
   schemas:
     ProblemDetails:
       type: object
-      description: Format galat standar RFC 7807 (Problem Details).
+      description: Format galat standar RFC 9457 (Problem Details) dengan field errors sebagai ekstensi validasi.
+      required:
+        - type
+        - title
+        - status
+        - detail
+        - instance
       properties:
         type:
           type: string
           format: uri
-          example: "https://example.com/probs/not-found"
+          example: "about:blank"
         title:
           type: string
           example: "Pesanan tidak ditemukan"
@@ -300,28 +307,39 @@ components:
         instance:
           type: string
           example: "/api/v1/pesanan/999"
+        errors:
+          type: object
+          description: Rincian kesalahan validasi per field.
+          additionalProperties:
+            type: array
+            items:
+              type: string
+        status_sekarang:
+          type: string
+          description: Status pesanan saat ini, tersedia pada galat 409.
+        status_diminta:
+          type: string
+          description: Status yang diminta, tersedia pada galat 409.
 
     Menu:
       type: object
       properties:
-        id:
-          type: integer
-          example: 1
         kode:
           type: string
-          example: "M001"
+          example: "MIN001"
         nama_menu:
           type: string
           example: "Air Mineral"
         kategori:
           type: string
-          example: "Minuman"
+          example: "minuman"
         harga:
-          type: number
-          example: 3000
+          type: string
+          pattern: '^\d+\.\d{2}$'
+          example: "3000.00"
         satuan:
           type: string
-          example: "item"
+          example: "botol"
         tersedia:
           type: boolean
           example: true
@@ -359,7 +377,7 @@ components:
       properties:
         kode_menu:
           type: string
-          example: "M001"
+          example: "MIN001"
         jumlah:
           type: integer
           minimum: 1
@@ -381,11 +399,13 @@ components:
           type: integer
           example: 2
         harga:
-          type: number
-          example: 6000
+          type: string
+          pattern: '^\d+\.\d{2}$'
+          example: "6000.00"
         total_harga:
-          type: number
-          example: 6000
+          type: string
+          pattern: '^\d+\.\d{2}$'
+          example: "6000.00"
         metode_pembayaran:
           type: string
           nullable: true
@@ -410,6 +430,9 @@ components:
         id:
           type: integer
           example: 1
+        order_id:
+          type: integer
+          example: 17
         menu_id:
           type: integer
           example: 1
@@ -420,11 +443,13 @@ components:
           type: integer
           example: 2
         harga_satuan:
-          type: number
-          example: 3000
+          type: string
+          pattern: '^\d+\.\d{2}$'
+          example: "3000.00"
         subtotal:
-          type: number
-          example: 6000
+          type: string
+          pattern: '^\d+\.\d{2}$'
+          example: "6000.00"
         created_at:
           type: string
           format: date-time

@@ -38,7 +38,7 @@ return [
                 /*
                  * Set this to `json` or `yaml` to determine which documentation file to use in UI
                  */
-                'format_to_use_for_docs' => env('L5_FORMAT_TO_USE_FOR_DOCS', 'json'),
+                'format_to_use_for_docs' => 'yaml',
 
                 /*
                  * Absolute paths to directory containing the swagger annotations are stored.
@@ -257,7 +257,7 @@ return [
          * Set this to `true` in development mode so that docs would be regenerated on each request
          * Set this to `false` to disable swagger generation on production
          */
-        'generate_always' => env('L5_SWAGGER_GENERATE_ALWAYS', false),
+        'generate_always' => false,
 
         /*
          * Set this to `true` to generate a copy of documentation in yaml format

@@ -28,9 +28,12 @@ class CatatPenjualan
             }
         }
 
-        // Kunci idempoten: satu pesanan = satu baris jurnal.
-        // Pesanan tidak mengirim message_id, jadi pakai id pesanan.
-        $kunci = $messageId !== '' ? $messageId : 'order-'.$data['id'];
+        // Outbox mengirim event_id juga sebagai properti AMQP message_id.
+        // Fallback ke ID pesanan menjaga kompatibilitas event lama.
+        $eventId = $event['event_id'] ?? null;
+        $kunci = $messageId !== ''
+            ? $messageId
+            : (is_string($eventId) && $eventId !== '' ? $eventId : 'order-'.$data['id']);
 
         $jumlah = (int) $data['jumlah'];
 

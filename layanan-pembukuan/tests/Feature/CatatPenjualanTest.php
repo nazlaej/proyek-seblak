@@ -5,7 +5,10 @@ namespace Tests\Feature;
 use App\Models\JurnalPenjualan;
 use App\Pembukuan\CatatPenjualan;
 use App\Pembukuan\PesanTidakValid;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
 
 class CatatPenjualanTest extends TestCase
@@ -73,6 +76,19 @@ class CatatPenjualanTest extends TestCase
         $this->assertSame('order-99', $jurnal->message_id);
     }
 
+    public function test_event_id_payload_menjadi_kunci_idempoten_tanpa_header(): void
+    {
+        $event = $this->eventPesanan(['id' => 101]);
+        $event['event_id'] = 'f829dc8a-3268-4f47-b170-6cc4b9625c2e';
+        $catat = app(CatatPenjualan::class);
+
+        $this->assertTrue($catat($event, ''));
+        $this->assertFalse($catat($event, ''));
+
+        $this->assertDatabaseCount('jurnal_penjualan', 1);
+        $this->assertDatabaseHas('jurnal_penjualan', ['message_id' => $event['event_id']]);
+    }
+
     public function test_pesan_tanpa_field_wajib_ditolak(): void
     {
         $this->expectException(PesanTidakValid::class);
@@ -88,5 +104,54 @@ class CatatPenjualanTest extends TestCase
         $this->expectException(PesanTidakValid::class);
 
         app(CatatPenjualan::class)(['event' => 'order.created'], 'pesan-4');
+    }
+
+    public function test_migrasi_baseline_mengadopsi_tabel_lama_tanpa_menghapus_jurnal(): void
+    {
+        $defaultConnection = config('database.default');
+        config(['database.connections.legacy_probe' => [
+            'driver' => 'sqlite',
+            'database' => ':memory:',
+            'prefix' => '',
+            'foreign_key_constraints' => true,
+        ]]);
+        DB::purge('legacy_probe');
+        config(['database.default' => 'legacy_probe']);
+
+        try {
+            Schema::create('jurnal_penjualan', function (Blueprint $table) {
+                $table->id();
+                $table->string('message_id')->unique();
+                $table->string('sku', 7);
+                $table->unsignedInteger('jumlah');
+                $table->unsignedBigInteger('harga_satuan');
+                $table->unsignedBigInteger('total');
+                $table->timestamp('terjadi_pada');
+                $table->timestamps();
+            });
+            DB::table('jurnal_penjualan')->insert([
+                'message_id' => 'order-lama-7',
+                'sku' => 'CEKER',
+                'jumlah' => 2,
+                'harga_satuan' => 2000,
+                'total' => 4000,
+                'terjadi_pada' => '2026-10-01 10:00:00',
+                'created_at' => '2026-10-01 10:00:00',
+                'updated_at' => '2026-10-01 10:00:00',
+            ]);
+
+            $migration = require database_path('migrations/2026_10_19_031404_create_jurnal_penjualan_table.php');
+            $migration->up();
+            $migration->down();
+
+            $this->assertDatabaseHas('jurnal_penjualan', [
+                'message_id' => 'order-lama-7',
+                'sku' => 'CEKER',
+                'total' => 4000,
+            ]);
+        } finally {
+            config(['database.default' => $defaultConnection]);
+            DB::purge('legacy_probe');
+        }
     }
 }

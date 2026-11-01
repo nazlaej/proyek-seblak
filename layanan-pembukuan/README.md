@@ -6,10 +6,10 @@
 
 | Nama | NIM | Tanggung Jawab |
 |------|-----|----------------|
-| Diva Anastasya | 1224026 | Layanan pembukuan dan pengujian consumer |
-| Dira Andrianti Rahmah | 1224006 | Dokumen analisis dan alur dapur |
-| Nur Alifah Anggraeni | 1224021 | Integrasi RabbitMQ dan outbox |
-| Nadjlah Cahya Nerik Fadilah | 3224001 | Layanan pesanan dan REST API |
+| Nadjlah Cahya Nerik Fadilah | 3224001 | Layanan Pesanan dan REST API: endpoint, validasi, perhitungan harga, perubahan status, serta respons API. |
+| Nur Alifah Anggraeni | 1224021 | Integrasi RabbitMQ dan Outbox: kontrak event, publisher, retry manual melalui `outbox:publish`, serta pengujian kegagalan broker dan pengiriman ulang. |
+| Diva Anastasya | 1224026 | Layanan Pembukuan dan pengujian consumer: jurnal, dashboard, duplikasi pesan, serta pesan rusak/DLQ. |
+| Dira Andrianti Rahmah | 1224006 | Dokumen analisis dan alur Dapur: penyelarasan diagram, perkembangan Tugas 3, consumer Dapur, serta pencatatan hasil uji alur pesanan. |
 
 ## Latar Belakang dan Tujuan
 
@@ -75,6 +75,8 @@ Setiap pesanan yang dicatat menghasilkan satu baris pada tabel `jurnal_penjualan
 
 Semua pengaturan koneksi RabbitMQ diambil dari berkas `config/rabbitmq.php`. Layanan Pembukuan **tidak menjalankan RabbitMQ sendiri**; ia terhubung ke RabbitMQ milik Layanan Pesanan melalui jaringan Docker eksternal. Komponen yang digunakan adalah:
 
+Contoh `.env` memakai `APP_PORT=8084`, `FORWARD_DB_PORT=3311`, dan `VITE_PORT=5177` agar tidak berbenturan dengan Pesanan atau Dapur. Fallback koneksi RabbitMQ di `config/rabbitmq.php` disamakan dengan broker Pesanan.
+
 | Komponen | Nilai |
 |----------|-------|
 | Exchange | `seblak.events` (tipe `topic`, durable) |
@@ -90,6 +92,7 @@ Pesan yang dikonsumsi mengikuti format event yang tetap:
 
 ```json
 {
+  "event_id": "02745a26-52cf-4bda-94d2-76d594fd321e",
   "event": "order.created",
   "data": { },
   "occurred_at": "2026-10-21T02:24:00.081070Z"
@@ -98,7 +101,9 @@ Pesan yang dikonsumsi mengikuti format event yang tetap:
 
 ## Pencatatan yang Idempoten
 
-Pencatatan penjualan dirancang agar aman terhadap pengiriman ulang oleh broker. Kunci idempoten diambil dari `message_id` pesan; karena Layanan Pesanan tidak menyertakan `message_id`, kunci dibentuk dari ID pesanan (`order-{id}`). Handler memakai `firstOrCreate` dengan kolom `message_id` yang unik, sehingga pesan yang datang dua kali tidak akan menghasilkan dua baris jurnal. Pesan yang tidak memiliki data pesanan atau kehilangan field wajib akan ditolak sebagai pesan tidak valid dan diarahkan ke dead letter queue.
+Pencatatan penjualan dirancang aman terhadap pengiriman ulang. Outbox mengirim `event_id` pada payload dan sebagai properti AMQP `message_id`; consumer memakai ID itu sebagai kunci jurnal. Jika menerima event lama tanpa ID, consumer memakai `order-{id}`. Kolom `message_id` unik dan `firstOrCreate` mencegah satu event tercatat dua kali. Pesan tidak valid diarahkan ke dead letter queue.
+
+Pembatalan pesanan belum menerbitkan event kompensasi. Jurnal yang sudah dibuat tetap ada dan tidak berubah otomatis saat pesanan dibatalkan di Layanan Pesanan.
 
 ## Instalasi dan Menjalankan Proyek
 
@@ -108,13 +113,16 @@ Pastikan **Docker Desktop** dan **WSL** sudah terpasang, serta container Layanan
 # 1. Masuk ke folder proyek
 cd ~/layanan-pembukuan
 
-# 2. Siapkan berkas environment
-cp .env.example .env
+# 2. Buat berkas environment hanya jika belum ada
+test -f .env || cp .env.example .env
 
-# 3. Jalankan seluruh container (Laravel dan MySQL)
+# 3. Pasang dependensi sesuai composer.lock
+composer install --no-interaction --prefer-dist
+
+# 4. Jalankan seluruh container (Laravel dan MySQL)
 ./vendor/bin/sail up -d
 
-# 4. Jalankan migrasi database
+# 5. Jalankan migrasi database
 ./vendor/bin/sail artisan migrate
 ```
 
@@ -126,7 +134,17 @@ Untuk mulai mencatat penjualan, jalankan consumer pada terminal terpisah:
 
 Consumer akan menampilkan pesan bahwa pembukuan sedang menunggu, dan menampilkan setiap penjualan yang dicatat.
 
+Saat consumer mulai, ia mendeklarasikan queue durable `pembukuan.orders` dan binding `order.created`. Jika event masih tertunda karena RabbitMQ sebelumnya tidak tersedia, jalankan retry **manual** dari folder `layanan-pesanan` dengan `./vendor/bin/sail artisan outbox:publish`. Retry otomatis terjadwal belum tersedia.
+
 ## Panduan Pengujian Ujung ke Ujung
+
+Jalankan feature test dengan basis data SQLite dalam memori:
+
+```bash
+./vendor/bin/sail artisan test
+```
+
+Pengujian `tests/Feature/CatatPenjualanTest.php` memeriksa pencatatan idempoten tanpa RabbitMQ.
 
 Untuk membuktikan bahwa penjualan benar-benar tercatat, ikuti langkah berikut:
 
