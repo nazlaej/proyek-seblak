@@ -6,8 +6,8 @@
 
 | Nama | NIM | Tanggung Jawab |
 |------|-----|----------------|
-| Diva Anastasya | 1224026 | Layanan pembukuan dan pengujian consumer |
-| Dira Andrianti Rahmah | 1224006 | Dokumen analisis dan alur dapur |
+| Diva Anastasya | 1224026 | Layanan Pembukuan dan pengujian consumer |
+| Dira Andrianti Rahmah | 1224006 | Dokumen analisis dan Layanan Dapur |
 | Nur Alifah Anggraeni | 1224021 | Integrasi RabbitMQ dan outbox |
 | Nadjlah Cahya Nerik Fadilah | 3224001 | Layanan pesanan dan REST API |
 
@@ -62,7 +62,7 @@ Setiap pesanan yang masuk disimpan pada tabel `antrian_dapur`. Struktur kolomnya
 | Kolom | Tipe | Keterangan |
 |-------|------|-----------|
 | `id` | bigint unsigned | Kunci utama. |
-| `order_id` | integer | ID pesanan asal dari Layanan Pesanan. |
+| `order_id` | integer | ID pesanan asal dari Layanan Pesanan, unik untuk mencegah duplikasi. |
 | `nama_pelanggan` | string | Nama pelanggan yang memesan. |
 | `detail_item` | json | Daftar item pesanan (menu dan jumlah). |
 | `status` | string | Status pengerjaan, diawali `menunggu`. |
@@ -71,6 +71,8 @@ Setiap pesanan yang masuk disimpan pada tabel `antrian_dapur`. Struktur kolomnya
 ## Konfigurasi RabbitMQ
 
 Semua pengaturan koneksi RabbitMQ diambil dari berkas `config/rabbitmq.php` yang membaca nilai dari environment. Layanan Dapur **tidak menjalankan RabbitMQ sendiri**; ia terhubung ke RabbitMQ milik Layanan Pesanan melalui jaringan Docker eksternal `layanan-pesanan_sail`. Nama host `rabbitmq` merujuk pada container RabbitMQ tersebut. Komponen yang digunakan adalah:
+
+Untuk menghindari benturan dengan Pesanan, contoh `.env` memakai `APP_PORT=8083`, `FORWARD_DB_PORT=3310`, dan `VITE_PORT=5176`.
 
 | Komponen | Nilai |
 |----------|-------|
@@ -85,13 +87,18 @@ Pesan yang dikonsumsi mengikuti format event yang tetap:
 
 ```json
 {
+  "event_id": "02745a26-52cf-4bda-94d2-76d594fd321e",
   "event": "order.created",
   "data": { },
   "occurred_at": "2026-10-21T02:24:00.081070Z"
 }
 ```
 
-Consumer menerapkan Quality of Service (QoS) satu pesan sekaligus, dan mengakui setiap pesan dengan ACK hanya setelah penyimpanan ke database berhasil. Bila pemrosesan gagal, pesan ditolak dengan NACK dan kegagalannya dicatat pada log.
+Publisher mengirim `event_id` pada payload dan sebagai properti AMQP `message_id`. Dapur memakai `data.id` sebagai `order_id` unik untuk mencegah antrean ganda.
+
+Consumer menerapkan Quality of Service (QoS) satu pesan sekaligus. Event diproses melalui `processEvent`, dan pesan duplikat dilewati. Kolom `order_id` memiliki indeks unik sebagai perlindungan terhadap pengiriman ulang bersamaan, lalu pesan di-ACK sesudah penyimpanan atau sesudah duplikat terdeteksi. Pesan gagal di-NACK tanpa requeue; antrean Dapur saat ini belum memasang dead-letter queue, sehingga kegagalan dicatat di log tetapi tidak disimpan di DLQ.
+
+Pembatalan pesanan pada layanan Pesanan saat ini belum menerbitkan event pembatalan. Karena itu, pembatalan tidak menghapus atau mengubah antrean Dapur secara otomatis.
 
 ## Instalasi dan Menjalankan Proyek
 
@@ -101,13 +108,16 @@ Pastikan **Docker Desktop** dan **WSL** sudah terpasang, serta container Layanan
 # 1. Masuk ke folder proyek
 cd ~/layanan-dapur
 
-# 2. Siapkan berkas environment
-cp .env.example .env
+# 2. Buat berkas environment hanya jika belum ada
+test -f .env || cp .env.example .env
 
-# 3. Jalankan seluruh container (Laravel dan MySQL)
+# 3. Pasang dependensi sesuai composer.lock
+composer install --no-interaction --prefer-dist
+
+# 4. Jalankan seluruh container (Laravel dan MySQL)
 ./vendor/bin/sail up -d
 
-# 4. Jalankan migrasi database
+# 5. Jalankan migrasi database
 ./vendor/bin/sail artisan migrate
 ```
 
@@ -119,7 +129,17 @@ Untuk mulai menunggu pesanan, jalankan consumer pada terminal terpisah:
 
 Consumer akan menampilkan pesan bahwa dapur sedang menunggu, dan menampilkan setiap pesanan yang masuk.
 
+Saat consumer mulai, ia mendeklarasikan queue durable `dapur.orders` dan binding `order.created`. Jika event masih tertunda karena RabbitMQ sebelumnya tidak tersedia, jalankan retry **manual** dari folder `layanan-pesanan` dengan `./vendor/bin/sail artisan outbox:publish`. Retry otomatis terjadwal belum tersedia.
+
 ## Panduan Pengujian Ujung ke Ujung
+
+Pengujian fitur consumer dapat dijalankan tanpa RabbitMQ dan memakai SQLite dalam memori:
+
+```bash
+./vendor/bin/sail artisan test
+```
+
+`tests/Feature/DapurConsumerTest.php` memeriksa event valid, pengiriman ulang event yang sama, dan indeks unik database untuk `order_id`.
 
 Untuk membuktikan bahwa pesanan benar-benar sampai ke dapur, ikuti langkah berikut:
 

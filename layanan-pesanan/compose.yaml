@@ -33,6 +33,8 @@ services:
             RABBITMQ_DEFAULT_PASS: 'seblak_secret'
         networks:
             - sail
+        volumes:
+            - 'sail-rabbitmq:/var/lib/rabbitmq'
         healthcheck:
             test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
             interval: 10s
@@ -68,4 +70,6 @@ networks:
         driver: bridge
 volumes:
     sail-mysql:
+        driver: local
+    sail-rabbitmq:
         driver: local

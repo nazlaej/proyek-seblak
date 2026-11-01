@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\AntrianDapur;
+use Closure;
 use Illuminate\Console\Command;
 use PhpAmqpLib\Connection\AMQPStreamConnection;
 use PhpAmqpLib\Message\AMQPMessage;
@@ -14,36 +15,58 @@ class DapurConsumer extends Command
 
     protected $description = 'Menerima event order.created dari RabbitMQ dan menyimpannya ke antrian dapur';
 
-    // ===== METHOD UNTUK TEST & PANGGILAN CALLBACK =====
-    public function processEvent(array $event, string $messageId = ''): bool
+    /** Simpan satu envelope event order.created; kunci unik order_id melindungi replay serentak. */
+    public function processEvent(array $event): bool
     {
-        $payload = $event;
-
-        if (!is_array($payload) || !isset($payload['data']) || !is_array($payload['data'])) {
+        if (! isset($event['data']) || ! is_array($event['data'])) {
             throw new \RuntimeException('Payload pesanan tidak valid.');
         }
 
-        $data = $payload['data'];
-
-        if (!isset($data['id'])) {
+        $data = $event['data'];
+        if (! isset($data['id'])) {
             throw new \RuntimeException('Payload pesanan tidak memiliki id.');
         }
 
-        // Cek idempoten: order_id sudah ada? (hindari pencatatan ganda)
-        if (AntrianDapur::where('order_id', $data['id'])->exists()) {
-            return false; // sudah diproses, abaikan duplikat
-        }
+        $antrian = AntrianDapur::firstOrCreate(
+            ['order_id' => $data['id']],
+            [
+                'nama_pelanggan' => $data['nama_pelanggan'] ?? '-',
+                'detail_item' => $data['items'] ?? [],
+                'status' => 'menunggu',
+            ],
+        );
 
-        AntrianDapur::create([
-            'order_id' => $data['id'],
-            'nama_pelanggan' => $data['nama_pelanggan'] ?? '-',
-            'detail_item' => $data['items'] ?? [],
-            'status' => 'menunggu',
-        ]);
-
-        return true;
+        return $antrian->wasRecentlyCreated;
     }
-    // ===================================
+
+    /** Callback ini dipisah agar alur decode, ACK, dan duplicate dapat diuji tanpa broker. */
+    public function consumerCallback(): Closure
+    {
+        return function (AMQPMessage $message): void {
+            try {
+                $payload = json_decode($message->getBody(), true, 512, JSON_THROW_ON_ERROR);
+                if (! is_array($payload)) {
+                    throw new \RuntimeException('Payload pesanan tidak valid.');
+                }
+
+                $created = $this->processEvent($payload);
+                $orderId = $payload['data']['id'] ?? '?';
+
+                if ($created) {
+                    $this->info('PESANAN MASUK KE DAPUR: pesanan #'.$orderId.' atas nama '.($payload['data']['nama_pelanggan'] ?? '-'));
+                } else {
+                    $this->line('Pesanan #'.$orderId.' sudah tercatat; duplikat dilewati.');
+                }
+
+                // Event baru maupun duplikat dianggap selesai setelah proses idempoten berhasil.
+                $message->ack();
+            } catch (Throwable $e) {
+                // Pesan tidak valid atau kegagalan simpan tidak diulang tanpa batas.
+                $message->nack(false);
+                $this->error('Gagal memproses pesanan: '.$e->getMessage());
+            }
+        };
+    }
 
     public function handle(): int
     {
@@ -56,55 +79,13 @@ class DapurConsumer extends Command
         );
 
         $channel = $connection->channel();
-
-        // Exchange yang sama dengan layanan Kasir (topic, durable).
         $channel->exchange_declare('seblak.events', 'topic', false, true, false);
-
-        // Queue KHUSUS Dapur agar tidak berebut pesan dengan consumer lain.
         $channel->queue_declare('dapur.orders', false, true, false, false);
-
-        // Bind queue Dapur ke exchange dengan routing key order.created.
         $channel->queue_bind('dapur.orders', 'seblak.events', 'order.created');
-
-        // Proses satu pesan sekaligus agar adil dan cepat.
         $channel->basic_qos(null, 1, null);
 
         $this->info('Dapur menunggu pesanan... Tekan Ctrl+C untuk berhenti.');
-
-        $callback = function (AMQPMessage $message) {
-            try {
-                $payload = json_decode($message->getBody(), true);
-
-                if (!is_array($payload) || !isset($payload['data']) || !is_array($payload['data'])) {
-                    throw new \RuntimeException('Payload pesanan tidak valid.');
-                }
-
-                $data = $payload['data'];
-                $messageId = $payload['message_id'] ?? $message->getMessageId();
-
-                // Panggil processEvent yang sudah idempotent (cek duplikat sebelum simpan)
-                $created = $this->processEvent($data, $messageId);
-
-                if ($created) {
-                    $this->info(
-                        'PESANAN MASUK KE DAPUR: pesanan #' . ($data['id'] ?? '?') .
-                        ' atas nama ' . ($data['nama_pelanggan'] ?? '-')
-                    );
-                } else {
-                    $this->info('Duplikat diabaikan: pesanan #' . ($data['id'] ?? '?'));
-                }
-
-                // ACK hanya setelah diproses (atau duplikat diabaikan).
-                $message->ack();
-            } catch (Throwable $e) {
-                // NACK tanpa requeue agar pesan gagal tidak berputar tanpa akhir.
-                $message->nack(false);
-
-                $this->error('Gagal memproses pesanan: ' . $e->getMessage());
-            }
-        };
-
-        $channel->basic_consume('dapur.orders', '', false, false, false, false, $callback);
+        $channel->basic_consume('dapur.orders', '', false, false, false, false, $this->consumerCallback());
 
         try {
             while ($channel->is_consuming()) {

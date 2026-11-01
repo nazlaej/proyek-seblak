@@ -4,9 +4,8 @@ use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Http\Request;
-use Illuminate\Http\Exceptions\ThrottleRequestsException;
 use Illuminate\Validation\ValidationException;
-use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -23,29 +22,43 @@ return Application::configure(basePath: dirname(__DIR__))
             fn (Request $request) => $request->is('api/*') || $request->expectsJson(),
         );
 
-        // Problem Details untuk 422 validasi (RFC 7807)
-        $exceptions->render(function (ValidationException $e, Request $request) {
-            return response()->json([
-                'type'  => 'urn:seblak:problem:validasi-gagal',
-                'title' => 'Data tidak valid',
-                'status'=> 422,
-                'detail'=> $e->validator->errors()->first(),
-                'instance'=> $request->path(),
-            ], 422, [
-                'Content-Type' => 'application/problem+json',
-            ]);
-        });
+        $exceptions->render(function (\Throwable $exception, Request $request) {
+            if (! $request->is('api/*')) {
+                return null;
+            }
 
-        // Problem Details untuk 404 model tidak ditemukan
-        $exceptions->render(function (ModelNotFoundException $e, Request $request) {
-            return response()->json([
-                'type'  => 'urn:seblak:problem:not-found',
-                'title' => 'Pesanan tidak ditemukan',
-                'status'=> 404,
-                'detail'=> 'Pesanan dengan nomor tersebut tidak ada.',
-                'instance'=> $request->path(),
-            ], 404, [
-                'Content-Type' => 'application/problem+json',
-            ]);
+            if ($exception instanceof ValidationException) {
+                $errors = $exception->errors();
+                $detail = collect($errors)->flatten()->first() ?? 'Data yang dikirim tidak valid.';
+
+                return \App\Support\ApiProblem::response(
+                    422,
+                    'Data tidak valid',
+                    $detail,
+                    '/'.$request->path(),
+                    ['errors' => $errors],
+                );
+            }
+
+            $status = $exception instanceof HttpExceptionInterface
+                ? $exception->getStatusCode()
+                : 500;
+            $title = match ($status) {
+                404 => 'Sumber daya tidak ditemukan',
+                405 => 'Metode tidak diizinkan',
+                409 => 'Konflik',
+                429 => 'Terlalu banyak permintaan',
+                default => $status >= 500 ? 'Kesalahan server' : 'Permintaan gagal',
+            };
+            $detail = $status >= 500
+                ? 'Terjadi kesalahan pada server.'
+                : ($exception->getMessage() ?: $title);
+
+            return \App\Support\ApiProblem::response(
+                $status,
+                $title,
+                $detail,
+                '/'.$request->path(),
+            );
         });
     })->create();

@@ -11,6 +11,33 @@ return new class extends Migration
      */
     public function up(): void
     {
+        if (Schema::hasTable('jurnal_penjualan')) {
+            $columns = Schema::getColumnListing('jurnal_penjualan');
+            $wajib = [
+                'id', 'message_id', 'jumlah', 'harga_satuan', 'total',
+                'terjadi_pada', 'created_at', 'updated_at',
+            ];
+
+            if (array_diff($wajib, $columns) || ! array_intersect(['sku', 'nama_menu'], $columns)) {
+                throw new RuntimeException(
+                    'Tabel jurnal_penjualan sudah ada dengan skema yang tidak dikenal; migrasi dihentikan agar data tidak tertimpa.'
+                );
+            }
+
+            $hasUniqueMessageId = collect(Schema::getIndexes('jurnal_penjualan'))
+                ->contains(fn (array $index) => $index['unique'] && $index['columns'] === ['message_id']);
+
+            if (! $hasUniqueMessageId) {
+                throw new RuntimeException(
+                    'Tabel jurnal_penjualan tidak memiliki indeks unik message_id; migrasi dihentikan agar idempotensi tidak berubah.'
+                );
+            }
+
+            // Baseline lama dapat tertinggal Pending di ledger walaupun migrasi penerus
+            // sudah membuat dan mengubah tabel ini. Adopsi tanpa menulis ulang data.
+            return;
+        }
+
         Schema::create('jurnal_penjualan', function (Blueprint $table) {
             $table->id();
             $table->string('message_id')->unique();   // kunci idempoten: satu pesan = satu baris
@@ -28,6 +55,7 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::dropIfExists('jurnal_penjualan');
+        // up() dapat mengadopsi tabel yang sudah berisi jurnal. Jangan menjatuhkan
+        // data tersebut saat rollback batch yang mencatat migrasi kompatibilitas ini.
     }
 };

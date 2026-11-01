@@ -3,15 +3,15 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Events\OrderCreated;
 use App\Models\Order;
+use App\Services\OrderOutbox;
 use App\Services\OrderPublisher;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class OrderController extends Controller
 {
-    public function store(Request $request, OrderPublisher $publisher)
+    public function store(Request $request, OrderPublisher $publisher, OrderOutbox $outbox)
     {
         $validated = $request->validate([
             'nama_pelanggan' => 'required|string|max:255',
@@ -21,18 +21,22 @@ class OrderController extends Controller
             'metode_pembayaran' => 'nullable|string|max:50',
         ]);
 
-        $order = DB::transaction(function () use ($validated) {
+        $result = DB::transaction(function () use ($validated, $outbox) {
             $validated['total_harga'] =
                 $validated['jumlah'] * $validated['harga'];
 
             $validated['status'] = 'menunggu';
 
-            return Order::create($validated);
+            $order = Order::create($validated);
+
+            return [
+                'order' => $order->load('items'),
+                'outbox' => $outbox->recordCreated($order),
+            ];
         });
 
-        $publisher->publish(
-            new OrderCreated($order->toArray())
-        );
+        $publisher->publish($result['outbox']);
+        $order = $result['order'];
 
         return response()->json([
             'message' => 'Pesanan berhasil dibuat.',

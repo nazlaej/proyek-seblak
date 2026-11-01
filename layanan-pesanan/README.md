@@ -1,6 +1,6 @@
 # Layanan Pesanan Warung Seblak Ngakak
 
-**Sistem Layanan Pesanan Warung Seblak Ngakak** adalah sebuah layanan backend berbasis Laravel yang berfungsi sebagai otak dari proses pemesanan di Warung Seblak Ngakak. Sistem ini menyediakan REST API untuk menampilkan daftar menu, menerima pesanan pelanggan, menyimpan pesanan beserta rincian itemnya ke dalam database, serta menerbitkan event ke RabbitMQ agar proses lanjutan seperti pencatatan atau pemrosesan pesanan dapat berjalan secara asinkron. Tujuan utama dibangunnya sistem ini adalah menyediakan satu sumber data pesanan yang terpusat dan dapat dipercaya, sekaligus memisahkan proses pencatatan pesanan (yang harus cepat merespons pelanggan) dari proses-proses lain yang tidak harus selesai saat itu juga. Dengan pemisahan ini, ketika pelanggan mengirim pesanan, API dapat langsung merespons dengan cepat, sementara pengolahan lanjutan dikirim melalui mekanisme event yang andal.
+**Sistem Layanan Pesanan Warung Seblak Ngakak** menyediakan REST API untuk menu dan pesanan. Pesanan, item, dan event Outbox ditulis dalam satu transaksi. Setelah transaksi berhasil, API mencoba mengirim event ke RabbitMQ; jika broker gagal, event tetap tertunda dan dapat dicoba ulang secara manual.
 
 ## Anggota Kelompok dan Pembagian Tugas
 
@@ -96,6 +96,8 @@ layanan-pesanan/
 
 ## Dokumentasi Endpoint API
 
+Kontrak design-first ada di `routes/openapi.yaml`. Swagger UI L5-Swagger menyajikan `storage/api-docs/api-docs.yaml`; setelah mengubah kontrak, salin ulang berkas sumber ke salinan yang disajikan lalu jalankan lint Spectral. Route lama `GET /api/menus` dan `POST /api/orders` tetap tersedia untuk kompatibilitas.
+
 Seluruh endpoint tersedia di bawah prefiks `/api/v1`. Tabel berikut merangkum endpoint yang benar-benar terdaftar pada `routes/api.php` beserta fungsi dan contoh pemakaiannya.
 
 | Method | Endpoint | Fungsi |
@@ -119,7 +121,8 @@ Tidak memerlukan parameter. Contoh respons:
       "kategori": "minuman",
       "harga": "3000.00",
       "satuan": "botol",
-      "tersedia": true
+      "tersedia": true,
+      "stok": 20
     }
   ]
 }
@@ -156,6 +159,7 @@ Contoh respons berhasil (HTTP 201):
     "items": [
       {
         "id": 1,
+        "order_id": 17,
         "menu_id": 1,
         "nama_menu": "Air Mineral",
         "jumlah": 2,
@@ -167,7 +171,20 @@ Contoh respons berhasil (HTTP 201):
 }
 ```
 
-Bila data tidak valid, API mengembalikan HTTP 422 dengan daftar kesalahan validasi. Menu yang tidak ditemukan atau sedang tidak tersedia akan menolak pemesanan dengan pesan yang sesuai.
+Bila data tidak valid atau stok tidak cukup, API mengembalikan `application/problem+json` sesuai Problem Details. Validasi menyertakan ekstensi `errors` per field. Detail pesanan yang tidak ditemukan menghasilkan 404 Problem Details; transisi status yang tidak diizinkan menghasilkan 409 dengan `status_sekarang` dan `status_diminta`.
+
+Contoh respons validasi:
+
+```json
+{
+  "type": "about:blank",
+  "title": "Data tidak valid",
+  "status": 422,
+  "detail": "Nama pelanggan wajib diisi.",
+  "instance": "/api/v1/pesanan",
+  "errors": {"nama_pelanggan": ["Nama pelanggan wajib diisi."]}
+}
+```
 
 **3. Menampilkan semua pesanan** — `GET /api/v1/pesanan`
 
@@ -188,11 +205,11 @@ Mengembalikan seluruh pesanan beserta itemnya, diurutkan dari yang terbaru. Cont
 
 **4. Menampilkan detail pesanan** — `GET /api/v1/pesanan/{nomor}`
 
-Membutuhkan parameter path `nomor` berupa ID pesanan. Bila pesanan tidak ditemukan, API mengembalikan HTTP 404 dengan pesan `Pesanan tidak ditemukan.`
+Membutuhkan parameter path `nomor` berupa ID pesanan. Bila pesanan tidak ditemukan, API mengembalikan HTTP 404 `application/problem+json`.
 
 **5. Mengubah status pesanan** — `POST /api/v1/pesanan/{nomor}/perubahan-status`
 
-Request body memuat `status` dengan nilai salah satu dari `dimasak`, `siap`, `selesai`, atau `dibatalkan`. Perubahan status mengikuti alur yang disepakati: `diterima` dapat berubah menjadi `dimasak` atau `dibatalkan`; `dimasak` menjadi `siap`; dan `siap` menjadi `selesai`. Bila perpindahan status tidak sesuai alur, API mengembalikan HTTP 409 beserta keterangan status saat ini dan status yang diminta.
+Request body memuat `status` dengan nilai `dimasak`, `siap`, `selesai`, atau `dibatalkan`. Perubahan status pesanan diperiksa dan dikunci dalam transaksi. Pembatalan mengembalikan stok satu kali dalam transaksi yang sama; pengulangan pembatalan ditolak dengan HTTP 409. Saat ini pembatalan belum menerbitkan event, sehingga antrean Dapur dan jurnal Pembukuan tidak diberi tahu dan tidak berubah otomatis.
 
 ## Proses Pembuatan Pesanan Secara Rinci
 
@@ -208,11 +225,13 @@ Semua pengaturan koneksi RabbitMQ diambil dari berkas `config/rabbitmq.php` yang
 |----------|-------|
 | Exchange | `seblak.events` (tipe `topic`, durable) |
 | Routing key | `order.created` |
-| Queue Kasir | `seblak.orders` (durable) |
+| Queue demo Pesanan | `seblak.orders` (durable, opsional) |
 | Queue Dapur | `dapur.orders` (durable, milik layanan Dapur) |
 | Queue Pembukuan | `pembukuan.orders` (durable, milik layanan Pembukuan) |
 | Outbox | Tabel `outbox_messages` pada database layanan pesanan |
 | Publisher | `App\Services\OrderPublisher` |
+
+Compose Pesanan memasang volume `sail-rabbitmq:/var/lib/rabbitmq`. Pesan yang masih antre bertahan saat container dibuat ulang selama volume dipertahankan; menghapus volume akan menghapus data broker yang tersimpan.
 
 Target arsitektur memakai **queue sendiri untuk setiap layanan** yang terikat pada exchange yang sama (*publish–subscribe*). Satu event dapat diterima oleh Kasir, Dapur, dan Pembukuan secara independen. Dalam repo layanan pesanan ini, consumer demonstrasi hanya mendeklarasikan queue `seblak.orders`; queue dan binding Dapur serta Pembukuan harus tersedia di repo layanan masing-masing.
 
@@ -230,6 +249,8 @@ Jalur asinkron menggunakan satu event yang menghubungkan Layanan Pesanan (penerb
 | Penerbit | Layanan Pesanan (`App\Services\OrderPublisher`) |
 | Penerima | `dapur.orders` (Dapur), `pembukuan.orders` (Pembukuan) |
 | Format isi | JSON, `content_type: application/json`, `delivery_mode: persistent` |
+| ID pesan | `event_id` pada payload dan properti AMQP `message_id` |
+| Properti AMQP `type` | `order.created` |
 
 Pesan yang dipublikasikan mengikuti format event yang tetap:
 
@@ -294,41 +315,49 @@ Tabel `orders`, `order_items`, dan `outbox_messages` ditulis dalam satu transaks
 ./vendor/bin/sail artisan outbox:publish
 ```
 
-Perintah menerima opsi `--limit=100` untuk membatasi jumlah event per pemanggilan. Jika proses mati setelah RabbitMQ menerima pesan tetapi sebelum database menyimpan `published_at`, retry dapat menghasilkan duplikasi. Karena itu, consumer perlu idempoten berdasarkan `event_id`. Outbox menjamin event tercatat bersama transaksi dan dapat dikirim ulang; pola ini tidak menjamin pemrosesan tepat-satu-kali.
+Retry saat ini dijalankan **manual** dengan perintah tersebut; belum ada scheduler otomatis. Perintah menerima opsi `--limit=100`. Jika proses mati setelah RabbitMQ menerima pesan tetapi sebelum database menyimpan `published_at`, retry dapat menghasilkan duplikasi. Karena itu, consumer harus idempoten. Outbox memastikan event tercatat bersama transaksi dan dapat dikirim ulang, tetapi tidak menjamin pemrosesan tepat-satu-kali.
 
-## Instalasi dan Menjalankan Proyek
+## Setup, Consumer, Tes, dan Retry
 
-Untuk menjalankan proyek dari awal, pastikan **Docker Desktop** dan **WSL** sudah terpasang di komputer. Langkah-langkahnya adalah sebagai berikut:
+> Jalankan Pesanan lebih dahulu karena RabbitMQ berada pada Compose Pesanan dan menjadi jaringan bersama Dapur serta Pembukuan. Perintah berikut memakai `composer install` berdasarkan `composer.lock`; jangan gunakan `composer update`. Salin `.env.example` hanya bila `.env` belum ada, lalu isi konfigurasi lokal secara manual tanpa menimpa file yang sudah dipakai.
+
+### 1. Layanan Pesanan dan RabbitMQ
 
 ```bash
-# 1. Masuk ke folder proyek
-cd ~/layanan-pesanan
-
-# 2. Pasang dependency PHP dan siapkan environment
-composer install
-cp .env.example .env
-
-# Atur database dan RabbitMQ di .env untuk Docker Compose:
-# DB_CONNECTION=mysql, DB_HOST=mysql, DB_PORT=3306,
-# DB_DATABASE, DB_USERNAME, DB_PASSWORD, RABBITMQ_HOST=rabbitmq
-
-# 3. Buat application key
-./vendor/bin/sail artisan key:generate
-
-# 4. Jalankan seluruh container (Laravel, MySQL, RabbitMQ)
+cd /path/ke/proyek-seblak/layanan-pesanan
+composer install --no-interaction --prefer-dist
+test -f .env || cp .env.example .env
 ./vendor/bin/sail up -d
-
-# 5. Jalankan migrasi database dan seeder menu (termasuk tabel outbox)
-./vendor/bin/sail artisan migrate --seed
+./vendor/bin/sail artisan migrate
 ```
 
-Setelah container berjalan, consumer RabbitMQ dijalankan pada terminal terpisah agar dapat terus menunggu pesan tanpa menghentikan proses lain:
+Untuk database Pesanan yang benar-benar baru dan kosong, isi menu awal satu kali dengan `./vendor/bin/sail artisan db:seed --class=MenuSeeder`. Jangan jalankan seeder ulang pada database yang sudah berisi menu.
+
+### 2. Layanan Dapur dan Pembukuan
+
+Pada terminal baru untuk setiap layanan, jalankan perintah dari folder layanannya. Contoh Dapur:
 
 ```bash
-./vendor/bin/sail artisan rabbitmq:consume-orders
+cd /path/ke/proyek-seblak/layanan-dapur
+composer install --no-interaction --prefer-dist
+test -f .env || cp .env.example .env
+./vendor/bin/sail up -d
+./vendor/bin/sail artisan migrate
 ```
 
-Consumer akan menampilkan pesan bahwa sistem sedang menunggu pesanan, dan akan menampilkan isi pesan setiap kali ada event `order.created` yang masuk.
+Ulangi dengan `layanan-pembukuan` untuk Pembukuan. Kedua layanan tersambung ke jaringan RabbitMQ eksternal milik Pesanan; jalankan RabbitMQ Pesanan lebih dahulu.
+
+Jalankan satu consumer per layanan pada terminal terpisah:
+
+```bash
+# dari folder layanan-dapur
+./vendor/bin/sail artisan dapur:consume-orders
+
+# dari folder layanan-pembukuan
+./vendor/bin/sail artisan pembukuan:konsumsi
+```
+
+Consumer mendeklarasikan queue durable dan binding `order.created` saat mulai. `rabbitmq:consume-orders` pada Layanan Pesanan adalah consumer observasi opsional di queue `seblak.orders`; consumer bisnis yang menyimpan antrean dan jurnal tetap dijalankan dari folder Dapur dan Pembukuan.
 
 ## Cara Mengakses Aplikasi
 
@@ -346,7 +375,7 @@ Kredensial RabbitMQ Management tidak dicantumkan pada dokumentasi ini karena ber
 
 Untuk membuktikan bahwa pesanan benar-benar diproses dari ujung ke ujung, ikuti langkah berikut:
 
-1. Pastikan consumer sudah berjalan pada terminal terpisah dengan perintah `./vendor/bin/sail artisan rabbitmq:consume-orders`.
+1. Pastikan consumer `dapur:consume-orders` dan `pembukuan:konsumsi` sudah berjalan pada terminal masing-masing.
 2. Buka Swagger UI di http://localhost:8082/api/documentation.
 3. Pilih endpoint `POST /api/v1/pesanan`, lalu tekan **Try it out**.
 4. Isi request body menggunakan data menu yang benar-benar tersedia, misalnya:
@@ -362,29 +391,39 @@ Untuk membuktikan bahwa pesanan benar-benar diproses dari ujung ke ujung, ikuti 
 ```
 
 5. Tekan **Execute** dan periksa bahwa API mengembalikan HTTP 201 beserta data pesanan.
-6. Beralih ke terminal consumer, dan pastikan isi pesanan muncul pada layar. Kemunculan pesan ini menandakan bahwa event `order.created` berhasil melewati exchange, queue, hingga diterima consumer.
+6. Periksa terminal consumer Dapur dan Pembukuan; masing-masing harus menerima event `order.created` yang sama melalui queue berbeda.
 
-Bila pesan tidak muncul, periksa status RabbitMQ, binding queue, serta baris tertunda dengan menjalankan `./vendor/bin/sail artisan outbox:publish`. Beberapa consumer pada queue yang sama akan membagi pesan; untuk demonstrasi, jalankan satu consumer agar mudah mengamati pesan.
+Bila event tertunda karena broker gagal, retry Outbox dilakukan **manual** dari folder Pesanan:
 
 ```bash
-./vendor/bin/sail exec laravel.test pkill -f rabbitmq:consume-orders
+./vendor/bin/sail artisan outbox:publish
 ```
+
+Perintah ini mengirim ulang event tertunda dengan `event_id` yang sama; tidak membuat pesanan baru. Belum ada scheduler retry otomatis. Jalankan satu consumer per queue saat demo agar hasilnya mudah diamati.
 
 ## Pengujian Otomatis
 
-Proyek menyediakan pengujian otomatis berbasis PHPUnit. Pengujian fitur pada `tests/Feature/PesananApiTest.php` memeriksa empat skenario: pembuatan pesanan yang valid harus menghasilkan HTTP 201 dan menyimpan data pada tabel `orders` serta `order_items`; pembuatan pesanan tanpa nama pelanggan harus menghasilkan HTTP 422; stok menu harus berkurang sesuai jumlah yang dipesan; dan pesanan harus ditolak dengan HTTP 422 bila stok tidak mencukupi (stok tidak berubah). Pada pengujian ini, `OrderPublisher` digantikan oleh objek tiruan (mock) sehingga pengujian tidak bergantung pada RabbitMQ.
+Feature test memeriksa respons Problem Details, stok, transaksi, pencatatan Outbox, kompatibilitas endpoint lama, pembatalan idempoten, serta kondisi broker tidak tersedia. Sebagian besar tes memakai SQLite dalam memori dan memock publisher; uji pemulihan melalui broker dicatat di `docs/STATUS-CHECKPOINT-1.md`.
 
-Perintah untuk menjalankan seluruh pengujian:
+Feature test setiap layanan memakai basis data uji SQLite dalam memori. Jalankan perintah berikut dari masing-masing folder layanan:
 
 ```bash
+# dari layanan-pesanan
 ./vendor/bin/sail artisan test
+# ulangi dari layanan-dapur dan layanan-pembukuan
+```
+
+Lint kontrak OpenAPI dengan Spectral:
+
+```bash
+docker run --rm --network none -v "$PWD:/workspace:ro" -w /workspace stoplight/spectral:latest lint routes/openapi.yaml --ruleset .spectral.yaml
 ```
 
 Perlu dipahami bahwa pengujian fitur di atas **berbeda** dengan pengujian integrasi RabbitMQ. Pengujian fitur memverifikasi logika API dan penyimpanan database tanpa broker, sedangkan verifikasi jalur event secara nyata dilakukan melalui pengujian manual seperti dijelaskan pada bagian panduan Swagger, yaitu dengan mengamati pesan yang diterima consumer.
 
 ## Analisis dan persiapan Checkpoint 1
 
-Dokumen analisis 4–8 halaman, diagram tiga layanan, konteks mitra, masalah integrasi, pilihan gaya integrasi, dan trade-off tersedia pada [docs/analisis-checkpoint-1.md](docs/analisis-checkpoint-1.md). Dokumen Markdown ini menjadi sumber yang dapat diekspor menjadi PDF untuk pengumpulan.
+Laporan analisis final untuk Checkpoint 1 tersedia sebagai [PDF 13 halaman](../docs/analisis/Laporan-Dokumen_Analisis_Warung-Seblak.pdf). DOCX final dengan nama dasar yang sama belum tersedia; dokumen Word lama bukan pasangan final PDF ini.
 
 ### Urutan demo empat menit
 

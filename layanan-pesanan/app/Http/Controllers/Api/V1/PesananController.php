@@ -3,32 +3,25 @@
 namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
-use App\Events\OrderCreated;
 use App\Models\Menu;
 use App\Models\Order;
-use App\Models\OutboxMessage;
+use App\Services\OrderOutbox;
 use App\Services\OrderPublisher;
+use App\Support\ApiProblem;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
-use Illuminate\Support\Str;
 
 class PesananController extends Controller
 {
-    // Menampilkan semua pesanan
     public function index()
     {
-        $pesanan = Order::with('items')
-            ->orderByDesc('id')
-            ->get();
-
         return response()->json([
-            'data' => $pesanan,
+            'data' => Order::with('items')->orderByDesc('id')->get(),
         ], 200);
     }
 
-    // Membuat pesanan baru
-    public function store(Request $request, OrderPublisher $publisher)
+    public function store(Request $request, OrderPublisher $publisher, OrderOutbox $outbox)
     {
         $validated = $request->validate([
             'nama_pelanggan' => 'required|string|max:255',
@@ -38,7 +31,7 @@ class PesananController extends Controller
             'items.*.jumlah' => 'required|integer|min:1',
         ]);
 
-        $transaksi = DB::transaction(function () use ($validated) {
+        $transaksi = DB::transaction(function () use ($validated, $outbox) {
             $itemsPesanan = [];
             $totalHarga = 0;
 
@@ -48,33 +41,22 @@ class PesananController extends Controller
                     ->lockForUpdate()
                     ->first();
 
-                if (!$menu) {
+                if (! $menu) {
                     throw ValidationException::withMessages([
-                        'items' => [
-                            'Menu dengan kode ' .
-                            $item['kode_menu'] .
-                            ' tidak tersedia.',
-                        ],
+                        'items' => ['Menu dengan kode '.$item['kode_menu'].' tidak tersedia.'],
                     ]);
                 }
 
                 $jumlah = (int) $item['jumlah'];
-
                 if ($menu->stok < $jumlah) {
                     throw ValidationException::withMessages([
-                        'items' => [
-                            'Stok ' . $menu->nama_menu . ' tinggal ' .
-                            $menu->stok . ', tidak cukup untuk ' .
-                            $jumlah . '.',
-                        ],
+                        'items' => ['Stok '.$menu->nama_menu.' tinggal '.$menu->stok.', tidak cukup untuk '.$jumlah.'.'],
                     ]);
                 }
 
                 $menu->decrement('stok', $jumlah);
-
                 $harga = (float) $menu->harga;
                 $subtotal = $jumlah * $harga;
-
                 $itemsPesanan[] = [
                     'menu_id' => $menu->id,
                     'nama_menu' => $menu->nama_menu,
@@ -82,23 +64,16 @@ class PesananController extends Controller
                     'harga_satuan' => $harga,
                     'subtotal' => $subtotal,
                 ];
-
                 $totalHarga += $subtotal;
             }
 
             $pesanan = Order::create([
                 'nama_pelanggan' => $validated['nama_pelanggan'],
-                'nama_menu' => implode(
-                    ', ',
-                    array_column($itemsPesanan, 'nama_menu')
-                ),
-                'jumlah' => array_sum(
-                    array_column($itemsPesanan, 'jumlah')
-                ),
+                'nama_menu' => implode(', ', array_column($itemsPesanan, 'nama_menu')),
+                'jumlah' => array_sum(array_column($itemsPesanan, 'jumlah')),
                 'harga' => $totalHarga,
                 'total_harga' => $totalHarga,
-                'metode_pembayaran' =>
-                    $validated['metode_pembayaran'] ?? null,
+                'metode_pembayaran' => $validated['metode_pembayaran'] ?? null,
                 'status' => 'diterima',
             ]);
 
@@ -107,124 +82,114 @@ class PesananController extends Controller
             }
 
             $pesanan->load('items');
-            $event = new OrderCreated($pesanan->toArray());
-            $eventId = (string) Str::uuid();
-            $outboxMessage = OutboxMessage::create([
-                'event_id' => $eventId,
-                'event_name' => 'order.created',
-                'aggregate_type' => 'order',
-                'aggregate_id' => (string) $pesanan->id,
-                'payload' => [
-                    'event_id' => $eventId,
-                    'event' => 'order.created',
-                    'data' => $event->order,
-                    'occurred_at' => now()->toISOString(),
-                ],
-            ]);
 
             return [
                 'order' => $pesanan,
-                'outbox' => $outboxMessage,
+                'outbox' => $outbox->recordCreated($pesanan),
             ];
         });
 
-        $hasil = $transaksi['order'];
+        // Gagal publish tidak membatalkan pesanan; outbox tetap tertunda untuk retry manual.
         $publisher->publish($transaksi['outbox']);
 
         return response()->json([
             'message' => 'Pesanan berhasil dibuat.',
-            'data' => $hasil,
-        ], 201)->header(
-            'Location',
-            url('/api/v1/pesanan/' . $hasil->id)
-        );
+            'data' => $transaksi['order'],
+        ], 201)->header('Location', url('/api/v1/pesanan/'.$transaksi['order']->id));
     }
 
-    // Menampilkan detail satu pesanan
     public function show(string $nomor)
     {
         $pesanan = Order::with('items')->find($nomor);
-
-        if (!$pesanan) {
-            return response()->json([
-                'type'  => 'urn:seblak:problem:not-found',
-                'title' => 'Pesanan tidak ditemukan',
-                'status'=> 404,
-                'detail'=> 'Pesanan dengan nomor tersebut tidak ada.',
-                'instance'=> '/api/v1/pesanan/'.$nomor,
-            ], 404, ['Content-Type' => 'application/problem+json']);
+        if (! $pesanan) {
+            return ApiProblem::response(
+                404,
+                'Pesanan tidak ditemukan',
+                'Pesanan dengan nomor tersebut tidak ada.',
+                '/api/v1/pesanan/'.$nomor,
+            );
         }
 
-        return response()->json([
-            'data' => $pesanan,
-        ], 200);
+        return response()->json(['data' => $pesanan], 200);
     }
 
-    // Mengubah status pesanan
     public function ubahStatus(Request $request, string $nomor)
     {
         $validated = $request->validate([
             'status' => 'required|string|in:dimasak,siap,selesai,dibatalkan',
         ]);
-
-        $pesanan = Order::find($nomor);
-
-        if (!$pesanan) {
-            return response()->json([
-                'type'  => 'urn:seblak:problem:not-found',
-                'title' => 'Pesanan tidak ditemukan',
-                'status'=> 404,
-                'detail'=> 'Pesanan dengan nomor tersebut tidak ada.',
-                'instance'=> '/api/v1/pesanan/'.$nomor,
-            ], 404, ['Content-Type' => 'application/problem+json']);
-        }
-
-        $statusSekarang = $pesanan->status;
         $statusBaru = $validated['status'];
 
-        $alurStatus = [
-            'diterima' => ['dimasak', 'dibatalkan'],
-            'dimasak' => ['siap'],
-            'siap' => ['selesai'],
-            'selesai' => [],
-            'dibatalkan' => [],
-        ];
+        // Pemeriksaan status, penguncian, pemulihan stok, dan perubahan status atomik.
+        $hasil = DB::transaction(function () use ($nomor, $statusBaru) {
+            $pesanan = Order::whereKey($nomor)->lockForUpdate()->first();
+            if (! $pesanan) {
+                return ['problem' => [
+                    'status' => 404,
+                    'title' => 'Pesanan tidak ditemukan',
+                    'detail' => 'Pesanan dengan nomor tersebut tidak ada.',
+                    'instance' => '/api/v1/pesanan/'.$nomor.'/perubahan-status',
+                    'extensions' => [],
+                ]];
+            }
 
-        if (!in_array(
-            $statusBaru,
-            $alurStatus[$statusSekarang] ?? [],
-            true
-        )) {
-            return response()->json([
-                'type'  => 'urn:seblak:problem:conflict',
-                'title' => 'Perubahan status tidak diperbolehkan',
-                'status'=> 409,
-                'detail'=> 'Status tidak dapat diubah dari kondisi saat ini.',
-                'instance'=> '/api/v1/pesanan/'.$nomor.'/perubahan-status',
-            ], 409, ['Content-Type' => 'application/problem+json']);
-        }
+            $statusSekarang = $pesanan->status;
+            $alurStatus = [
+                'diterima' => ['dimasak', 'dibatalkan'],
+                'dimasak' => ['siap'],
+                'siap' => ['selesai'],
+                'selesai' => [],
+                'dibatalkan' => [],
+            ];
 
-        // Jika dibatalkan: kembalikan stok ke semua menu yang dipesan
-        if ($statusBaru === 'dibatalkan') {
-            DB::transaction(function () use ($pesanan) {
-                foreach ($pesanan->items as $item) {
-                    $menu = Menu::where('id', $item->menu_id)
-                        ->lockForUpdate()
-                        ->first();
+            if (! in_array($statusBaru, $alurStatus[$statusSekarang] ?? [], true)) {
+                return ['problem' => [
+                    'status' => 409,
+                    'title' => 'Perubahan status tidak diperbolehkan',
+                    'detail' => 'Status tidak dapat diubah dari '.$statusSekarang.' menjadi '.$statusBaru.'.',
+                    'instance' => '/api/v1/pesanan/'.$nomor.'/perubahan-status',
+                    'extensions' => [
+                        'status_sekarang' => $statusSekarang,
+                        'status_diminta' => $statusBaru,
+                    ],
+                ]];
+            }
+
+            if ($statusBaru === 'dibatalkan') {
+                $pesanan->load('items');
+                $jumlahPerMenu = $pesanan->items
+                    ->groupBy('menu_id')
+                    ->map(fn ($items) => $items->sum('jumlah'))
+                    ->sortKeys();
+
+                foreach ($jumlahPerMenu as $menuId => $jumlah) {
+                    $menu = Menu::whereKey($menuId)->lockForUpdate()->first();
                     if ($menu) {
-                        $menu->increment('stok', $item->jumlah);
+                        $menu->increment('stok', (int) $jumlah);
                     }
                 }
-            });
-        }
+            }
 
-        $pesanan->update([
-            'status' => $statusBaru,
-        ]);
+            $pesanan->update(['status' => $statusBaru]);
+
+            return ['order' => $pesanan->fresh()->load('items')];
+        });
+
+        if (isset($hasil['problem'])) {
+            $problem = $hasil['problem'];
+
+            return ApiProblem::response(
+                $problem['status'],
+                $problem['title'],
+                $problem['detail'],
+                $problem['instance'],
+                $problem['extensions'],
+            );
+        }
 
         return response()->json([
             'message' => 'Status pesanan berhasil diperbarui.',
-            'data' => $pesanan->fresh()->load('items'),
+            'data' => $hasil['order'],
         ], 200);
     }
 }
