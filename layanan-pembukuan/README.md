@@ -6,10 +6,10 @@
 
 | Nama | NIM | Tanggung Jawab |
 |------|-----|----------------|
-| Diva Anastasya | 1224026 | Layanan pembukuan dan pengujian consumer |
-| Dira Andrianti Rahmah | 1224006 | Dokumen analisis dan alur dapur |
-| Nur Alifah Anggraeni | 1224021 | Integrasi RabbitMQ dan outbox |
-| Nadjlah Cahya Nerik Fadilah | 3224001 | Layanan pesanan dan REST API |
+| Nadjlah Cahya Nerik Fadilah | 3224001 | Layanan Pesanan dan REST API: endpoint, validasi, perhitungan harga, perubahan status, serta respons API. |
+| Nur Alifah Anggraeni | 1224021 | Integrasi RabbitMQ dan Outbox: kontrak event, publisher, retry manual melalui `outbox:publish`, serta pengujian kegagalan broker dan pengiriman ulang. |
+| Diva Anastasya | 1224026 | Layanan Pembukuan dan pengujian consumer: jurnal, dashboard, duplikasi pesan, serta pesan rusak/DLQ. |
+| Dira Andrianti Rahmah | 1224006 | Dokumen analisis dan alur Dapur: penyelarasan diagram, perkembangan Tugas 3, consumer Dapur, serta pencatatan hasil uji alur pesanan. |
 
 ## Latar Belakang dan Tujuan
 
